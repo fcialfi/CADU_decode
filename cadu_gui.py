@@ -83,7 +83,9 @@ class CaduWindow:
 
         self.tabs = ttk.Notebook(root)
         self.tabs.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
-        self.summary_view = SummaryView(self.tabs, on_goto=self.open_cadu)
+        self.check_var = tk.StringVar(value=cd.DEFAULT_CHECKED_APIDS)  # APIDs whose continuity is checked
+        self.summary_view = SummaryView(self.tabs, on_goto=self.open_cadu, check_var=self.check_var,
+                                        on_check=self.refresh_summary)
         self.tabs.add(self.summary_view, text="Summary")
 
         frames_tab = ttk.Frame(self.tabs)
@@ -291,14 +293,28 @@ class CaduWindow:
             return [r for r in self.rows if r.get("rs") != "uncorrectable"]
         return self.rows
 
-    def refresh(self, progress: bool = False) -> None:
-        """Summary and frame table of the frames analysed (without the uncorrectable ones when excluded)."""
+    def refresh_summary(self) -> None:
+        """Summary tab and text report (also after a change of the APIDs checked)."""
+        try:
+            checked = cd.parse_apids(self.check_var.get())
+        except ValueError as exc:
+            messagebox.showerror("APIDs", f"{exc}\n\nWrite them as 100 or 15-16, 100.")
+            self.check_var.set(cd.DEFAULT_CHECKED_APIDS)
+            checked = cd.parse_apids(cd.DEFAULT_CHECKED_APIDS)
         if self.rows:
             self._set_text(self.summary_text, cd.summary(self._analysed(), len(self.data), self.cadu_len,
-                                                         all_rows=self.rows, packets=self.packets))
+                                                         all_rows=self.rows, packets=self.packets,
+                                                         checked_apids=checked))
         else:
             self._set_text(self.summary_text, ["No sync marker 1ACFFC1D found."])
+        top = self.summary_view.canvas.yview()[0]
         self.summary_view.update_view(self._analysed(), self.rows, len(self.data), self.cadu_len, self.packets)
+        self.root.update_idletasks()
+        self.summary_view.canvas.yview_moveto(top)  # keep the page where it was
+
+    def refresh(self, progress: bool = False) -> None:
+        """Summary and frame table of the frames analysed (without the uncorrectable ones when excluded)."""
+        self.refresh_summary()
         self.usual = cd.usual_clcw(self._analysed())
         vcs = sorted({r["vcid"] for r in self._analysed()})  # without the excluded frames
         self.vc_box.configure(values=[ALL] + [str(v) for v in vcs])

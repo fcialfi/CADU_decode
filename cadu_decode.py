@@ -476,7 +476,7 @@ def _extract(vc, s, st, keep_data):
 
 
 def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool = True, fecf: bool = False,
-                      max_gaps: int = 2000, progress=None) -> dict:
+                      max_gaps: int = 500, progress=None) -> dict:
     """Packets of the file per virtual channel and per APID, with the gaps of the sequence counters.
 
     A counter that goes back (by more than half its range: a jump of more than 8192 forward is read as one
@@ -484,7 +484,7 @@ def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool =
     (e.g. a recorder dump after the real-time data, or dumped in blocks).
     Returns {"vcs": per VC counts (see iter_packets), "apids": one dict per (APID, VC), "gaps": the gaps
     of a sequence counter inside a chain (nothing lost in the frames: the packets missing never reached
-    this VC; for each, the VCs where the missing counts were found), at most ``max_gaps``}.
+    this VC; for each, the VCs where the missing counts were found), at most ``max_gaps`` per APID and VC}.
     """
     from array import array
 
@@ -511,7 +511,7 @@ def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool =
                 elif chain == a["_chain"]:
                     a["gaps"] += 1
                     a["missing"] += step - 1
-                    if len(gaps) < max_gaps:
+                    if a["gaps"] <= max_gaps:
                         gaps.append({"apid": apid, "vc": vc, "before": a["last_seq"], "after": seq,
                                      "missing": step - 1, "frame_before": a["_frame"], "frame": frame})
                 else:
@@ -544,8 +544,29 @@ def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool =
     return {"vcs": vcs, "apids": table, "gaps": gaps}
 
 
-def packet_lines(stats: dict, max_listed: int = 50) -> list[str]:
-    """Text of the packet statistics (see packet_statistics)."""
+DEFAULT_CHECKED_APIDS = "100"  # science data (Payload Main Application)
+
+
+def parse_apids(text: str) -> set:
+    """APIDs written as 100 or 15-16, separated by commas or spaces."""
+    apids = set()
+    for part in text.replace(",", " ").split():
+        lo, _, hi = part.partition("-")
+        lo, hi = int(lo), int(hi or lo)
+        if not 0 <= lo <= hi <= 2047:
+            raise ValueError(f"APIDs are 0 to 2047: {part}")
+        apids.update(range(lo, hi + 1))
+    return apids
+
+
+def packet_lines(stats: dict, max_listed: int = 50, checked=None) -> list[str]:
+    """Text of the packet statistics (see packet_statistics).
+
+    The continuity of the sequence counts is given for the APIDs ``checked`` only (default: 100): the
+    others may be filtered or sampled on board (only some of their reports recorded), so that their
+    counters jump without anything being lost.
+    """
+    checked = parse_apids(DEFAULT_CHECKED_APIDS) if checked is None else set(checked)
     lines = ["Packets (rebuilt from the frames; uncorrectable frames left out):"]
     table = [("VC", "frames", "idle frames", "packets", "packet bytes", "idle packets", "cut", "resyncs")]
     for vc in sorted(stats["vcs"]):
@@ -563,28 +584,45 @@ def packet_lines(stats: dict, max_listed: int = 50) -> list[str]:
         length = str(a["min_length"]) if a["min_length"] == a["max_length"] else \
             f"{a['min_length']}-{a['max_length']}"
         idle = a["apid"] == IDLE_APID
-        table.append((f"{a['apid']}" + (" idle" if idle else ""), a["vc"], a["packets"], a["bytes"], length,
-                      a["first_seq"], a["last_seq"], "–" if idle else a["gaps"], "–" if idle else a["missing"],
-                      "–" if idle else f"{a['gaps_lost_frames']} ({a['missing_lost_frames']} missing)",
-                      "–" if idle else a["back_jumps"], "–" if idle else a["repeated"]))
+        check = a["apid"] in checked and not idle
+        table.append((f"{a['apid']}" + (" idle" if idle else " *" if check else ""), a["vc"], a["packets"],
+                      a["bytes"], length, a["first_seq"], a["last_seq"], a["gaps"] if check else "–",
+                      a["missing"] if check else "–",
+                      f"{a['gaps_lost_frames']} ({a['missing_lost_frames']} missing)" if check else "–",
+                      a["back_jumps"] if check else "–", a["repeated"] if check else "–"))
     lines += ["  " + line for line in _table(table)]
-    lines.append("  gaps / missing: sequence count jumps with no frame lost in between (packets that never "
-                 "reached this VC); at lost frames: jumps where frames of the VC are missing;")
-    lines.append("  back jumps: the counter goes back (another stretch of data, e.g. a recorder dump), not counted "
-                 "as missing")
-    if stats["gaps"]:
+    lines.append(f"  * continuity checked (APIDs {_apid_text(checked)}; --check-apids): gaps / missing: sequence "
+                 "count jumps with no frame lost in between (packets that never reached this VC);")
+    lines.append("    at lost frames: jumps where frames of the VC are missing; back jumps: the counter goes back "
+                 "(another stretch of data), not counted as missing")
+    gaps = [g for g in stats["gaps"] if g["apid"] in checked]
+    if gaps:
         lines.append("")
-        lines.append(f"  Sequence count gaps with no frame lost ({len(stats['gaps'])}"
-                     + (", first ones" if len(stats["gaps"]) >= 2000 else "") + "):")
+        lines.append(f"  Sequence count gaps with no frame lost, APIDs checked ({len(gaps)}):")
         table = [("APID", "VC", "count before", "count after", "missing", "CADU before", "CADU after",
                   "missing counts found in")]
-        for g in stats["gaps"][:max_listed]:
+        for g in gaps[:max_listed]:
             table.append((g["apid"], g["vc"], g["before"], g["after"], g["missing"], g["frame_before"], g["frame"],
                           ", ".join(f"VC {v}" for v in g["found_in"]) or "–"))
         lines += ["    " + line for line in _table(table, last_left=True)]
-        if len(stats["gaps"]) > max_listed:
-            lines.append(f"    ... {len(stats['gaps']) - max_listed} more")
+        if len(gaps) > max_listed:
+            lines.append(f"    ... {len(gaps) - max_listed} more")
     return lines
+
+
+def _apid_text(apids) -> str:
+    """APIDs as 15-16, 100."""
+    parts, run = [], []
+    for a in sorted(apids):
+        if run and a == run[-1] + 1:
+            run.append(a)
+            continue
+        if run:
+            parts.append(f"{run[0]}-{run[-1]}" if len(run) > 1 else str(run[0]))
+        run = [a]
+    if run:
+        parts.append(f"{run[0]}-{run[-1]}" if len(run) > 1 else str(run[0]))
+    return ", ".join(parts) or "none"
 
 
 def export_packets(data: bytes, rows, folder: str, interleave: int = 5, randomized: bool = True,
@@ -614,7 +652,8 @@ def export_packets(data: bytes, rows, folder: str, interleave: int = 5, randomiz
     return dict(counts)
 
 
-def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50, all_rows=None, packets=None) -> list[str]:
+def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50, all_rows=None, packets=None,
+            checked_apids=None) -> list[str]:
     """Summary of a file of CADUs: counts, Reed-Solomon, spacecraft, virtual channels, frame counters, CLCW
     and, with ``packets`` (from packet_statistics), the packets per VC and APID.
 
@@ -683,7 +722,7 @@ def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50, all_rows=N
                 lines.append(f"    ... {len(odd) - max_listed} more (--frames and -o list every frame)")
     if packets is not None:
         lines.append("")
-        lines += packet_lines(packets, max_listed)
+        lines += packet_lines(packets, max_listed, checked_apids)
     return lines
 
 
@@ -892,6 +931,9 @@ def main(argv=None) -> int:
                     help="leave the frames the Reed-Solomon code cannot correct out of the analysis")
     ap.add_argument("--no-packets", action="store_true",
                     help="do not rebuild the packets (no packet and APID statistics; faster)")
+    ap.add_argument("--check-apids", default=DEFAULT_CHECKED_APIDS, metavar="LIST",
+                    help="APIDs whose sequence count continuity is checked, e.g. 100 or 15-16,100 (default "
+                         f"{DEFAULT_CHECKED_APIDS}: science data); the others may be filtered on board")
     ap.add_argument("--export-packets", metavar="FOLDER",
                     help="write the packets of each APID to FOLDER/apid_NNNN.bin and their list to "
                          "FOLDER/packets.csv (idle packets left out)")
@@ -904,6 +946,10 @@ def main(argv=None) -> int:
         ap.error("--exclude-bad needs the Reed-Solomon check: drop --no-rs")
     if args.no_dump and not args.show:
         ap.error("--no-dump applies to --show only")
+    try:
+        checked_apids = parse_apids(args.check_apids)
+    except ValueError as exc:
+        ap.error(f"--check-apids: {exc}")
     if args.export_packets and args.no_packets:
         ap.error("--export-packets contradicts --no-packets")
 
@@ -937,7 +983,8 @@ def main(argv=None) -> int:
         return 0
     analysed = [r for r in rows if r.get("rs") != "uncorrectable"] if args.exclude_bad else rows
     packets = None if args.no_packets else packet_statistics(data, rows, args.interleave, randomized, args.fecf)
-    print("\n".join(summary(analysed, len(data), cadu_len, all_rows=rows, packets=packets)))
+    print("\n".join(summary(analysed, len(data), cadu_len, all_rows=rows, packets=packets,
+                             checked_apids=checked_apids)))
 
     if args.frames is not None:
         shown = analysed if args.frames == 0 else analysed[:args.frames]

@@ -249,7 +249,13 @@ def test_packets_rebuilt(tmp_path, capsys):
     out = tmp_path / "packets"
     assert cd.main([str(path), "--export-packets", str(out)]) == 0
     text = capsys.readouterr().out
-    assert "Packets (rebuilt from the frames" in text and "missing counts found in" in text
+    assert "Packets (rebuilt from the frames" in text and "missing counts found in" not in text  # 100 only
+    assert cd.main([str(path), "--check-apids", "35, 51"]) == 0
+    text = capsys.readouterr().out
+    assert "missing counts found in" in text and "APIDs 35, 51;" in text
+    assert cd.parse_apids("15-16, 100") == {15, 16, 100}
+    with pytest.raises(ValueError):
+        cd.parse_apids("3000")
     assert (out / "apid_0051.bin").read_bytes() == b"".join(p for p in stream if p[1] == 51)
     assert len((out / "packets.csv").read_text().splitlines()) == 1 + 40 + 21
     assert not (out / "apid_2047.bin").exists()

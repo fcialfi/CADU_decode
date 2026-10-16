@@ -128,9 +128,12 @@ class Page(ttk.Frame):
 class SummaryView(Page):
     """The summary of a file; ``update_view`` fills it, ``on_goto(number)`` opens a CADU."""
 
-    def __init__(self, parent, on_goto=None):
+    def __init__(self, parent, on_goto=None, check_var=None, on_check=None):
         super().__init__(parent, on_goto)
         self.chart_data = None
+        # APIDs whose sequence count continuity is checked (text, e.g. "100, 15-16"); on_check() applies it.
+        self.check_var = check_var or tk.StringVar(value=cd.DEFAULT_CHECKED_APIDS)
+        self.on_check = on_check
         self._message("Open a file of CADUs to see its summary.")
 
     def update_view(self, rows, all_rows, data_len, cadu_len, packets=None):
@@ -266,32 +269,52 @@ class SummaryView(Page):
                  "uncorrectable frame).  Resyncs: packet stream broken with no frame missing.", bg=BG, fg=MUTED,
                  font=self.f_small).pack(anchor="w", padx=16, pady=(4, 0))
 
-        self._section("Packets per APID", "missing: forward jumps of the sequence count, with no frame lost in "
-                      "between or at lost frames; back jumps: the count goes back (another stretch of data)")
-        table = []
+        self._section("Packets per APID", "continuity of the sequence count for the APIDs checked only: the "
+                      "others may be filtered or sampled on board")
+        try:
+            checked = cd.parse_apids(self.check_var.get())
+        except ValueError:
+            checked = set()
+        bar = tk.Frame(self.page, bg=BG)
+        bar.pack(fill=tk.X, padx=16, pady=(0, 6))
+        tk.Label(bar, text="Check the continuity of APIDs:", bg=BG, fg=TEXT, font=self.f_small).pack(side=tk.LEFT)
+        entry = ttk.Entry(bar, textvariable=self.check_var, width=18)
+        entry.pack(side=tk.LEFT, padx=6)
+        if self.on_check:
+            entry.bind("<Return>", lambda _e: self.on_check())
+            ttk.Button(bar, text="Apply", command=self.on_check).pack(side=tk.LEFT)
+        tk.Label(bar, text="e.g. 100 (science data) or 15-16, 100", bg=BG, fg=MUTED,
+                 font=self.f_small).pack(side=tk.LEFT, padx=8)
+        table, tags = [], []
         for a in stats["apids"]:
             idle = a["apid"] == cd.IDLE_APID
+            check = a["apid"] in checked and not idle
             length = str(a["min_length"]) if a["min_length"] == a["max_length"] else \
                 f"{a['min_length']}–{a['max_length']}"
             table.append((f"{a['apid']}" + (" (idle)" if idle else ""), a["vc"], f"{a['packets']:,}",
                           f"{a['bytes']:,}", length, a["first_seq"], a["last_seq"],
-                          "–" if idle else a["missing"], "–" if idle else a["missing_lost_frames"],
-                          "–" if idle else a["back_jumps"], "–" if idle else a["repeated"]))
+                          ("complete" if not (a["missing"] or a["missing_lost_frames"]) else "gaps") if check else "",
+                          a["missing"] if check else "", a["missing_lost_frames"] if check else "",
+                          a["back_jumps"] if check else "", a["repeated"] if check else ""))
+            tags.append(("" if not check else "gap" if a["missing"] or a["missing_lost_frames"] else "ok"))
         tree = self._table((("APID", 90), ("VC", 50), ("Packets", 90), ("Bytes", 110), ("Length", 80),
-                            ("Seq first", 80), ("Seq last", 80), ("Missing (no frame lost)", 170),
-                            ("Missing at lost frames", 160), ("Back jumps", 85), ("Repeated", 80)), table)
-        for item, a in zip(tree.get_children(), stats["apids"]):
-            if a["apid"] != cd.IDLE_APID and a["missing"]:
-                tree.item(item, tags=("gap",))
+                            ("Seq first", 75), ("Seq last", 75), ("Continuity", 80),
+                            ("Missing, no frame lost", 150), ("Missing, lost frames", 140), ("Back jumps", 85),
+                            ("Repeated", 80)), table)
+        for item, tag in zip(tree.get_children(), tags):
+            if tag:
+                tree.item(item, tags=(tag,))
         tree.tag_configure("gap", foreground=WARN)
+        tree.tag_configure("ok", foreground=GOOD)
 
-        if stats["gaps"]:
-            self._section(f"Sequence count gaps with no frame lost ({len(stats['gaps'])})",
+        gaps = [g for g in stats["gaps"] if g["apid"] in checked]
+        if gaps:
+            self._section(f"Sequence count gaps with no frame lost, APIDs checked ({len(gaps)})",
                           "packets that never reached this VC; double click: open the CADU after the gap")
             self._table((("APID", 60), ("VC", 50), ("Count before", 100), ("Count after", 100), ("Missing", 70),
                          ("CADU before", 100), ("CADU after", 100), ("Missing counts found in", 180)),
                         [(g["apid"], g["vc"], g["before"], g["after"], g["missing"], g["frame_before"], g["frame"],
-                          ", ".join(f"VC {v}" for v in g["found_in"]) or "–") for g in stats["gaps"]],
+                          ", ".join(f"VC {v}" for v in g["found_in"]) or "–") for g in gaps],
                         goto_column=6, anchors={7: "w"})
 
     # --- chart of the errors along the file ---
