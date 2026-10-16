@@ -10,7 +10,10 @@ pseudo-randomizer CCSDS. Con interleaving I = 5 il CADU è di 4 + 255·5 = 1279 
 Per ogni CADU lo script:
 
 - si sincronizza sul sync marker (se tra due CADU c'è altro, salta al marker successivo e lo segnala);
-- de-randomizza il codeblock (sequenza h(x) = x⁸ + x⁷ + x⁵ + x³ + 1, che inizia FF 48 0E C0 9A …);
+- de-randomizza il codeblock (sequenza h(x) = x⁸ + x⁷ + x⁵ + x³ + 1, che inizia FF 48 0E C0 9A …) se è
+  randomizzato. Molti ricevitori salvano i CADU già de-randomizzati: lo script lo riconosce da solo provando
+  le due letture sui primi 200 CADU (versione del frame 0 e master channel counter che sale di 1). Letti nel modo
+  sbagliato i virtual channel escono con il bit più alto invertito (0→4, 1→5, 7→3) e i contatori a salti;
 - legge il **primary header**: versione, SCID, VCID, OCF flag, master e virtual channel frame counter,
   secondary header flag, sync flag, packet order flag, segment length ID, First Header Pointer
   (7FF: nessun header di pacchetto, 7FE: solo idle data);
@@ -50,7 +53,8 @@ L'elenco frame per frame si aggiunge con `--frames` (o tutti i frame in CSV con 
 
 `python cadu_gui.py [file]` apre una finestra (Tkinter, incluso in Python):
 
-- **Open…** carica il file; interleaving, randomizzazione e FECF si cambiano in alto e il file viene riletto;
+- **Open…** carica il file; interleaving, randomizzazione (Auto / Yes / No) e FECF si cambiano in alto e il file
+  viene riletto; accanto al nome del file è scritto se i codeblock sono stati letti come randomizzati;
 - scheda **Summary**: il riepilogo;
 - scheda **Frames**: la tabella dei frame, con filtro per virtual channel, i frame idle nascondibili e
   **Go to CADU #**; selezionando una riga, sotto compare il contenuto del CADU come con `--show`
@@ -70,7 +74,7 @@ python cadu_decode.py capture.bin --show 125       # contenuto del CADU numero 1
 python cadu_gui.py capture.bin                     # finestra
 python cadu_decode.py capture.bin --interleave 4   # altro interleaving (CADU di 4 + 255·I byte)
 python cadu_decode.py capture.bin --fecf           # frame con FECF (2 byte) in coda
-python cadu_decode.py capture.bin --not-randomized # codeblock non randomizzato
+python cadu_decode.py capture.bin --randomization no   # forza: codeblock già de-randomizzato (yes: randomizzato)
 ```
 
 Il file può essere binario oppure testo con i byte in esadecimale (spazi e a capo ignorati).

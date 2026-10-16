@@ -29,6 +29,7 @@ class CaduWindow:
         self.data = b""
         self.rows: list[dict] = []
         self.path = None
+        self.randomized = True
         root.title("CADU Decoder")
         root.geometry("1250x820")
         self.mono = tkfont.nametofont("TkFixedFont").copy()
@@ -38,12 +39,16 @@ class CaduWindow:
         bar.pack(fill=tk.X)
         ttk.Button(bar, text="Open…", command=self.open_file).pack(side=tk.LEFT)
         self.interleave_var = tk.IntVar(value=5)
-        self.randomized_var = tk.BooleanVar(value=True)
+        self.randomized_var = tk.StringVar(value="Auto")
         self.fecf_var = tk.BooleanVar(value=False)
         ttk.Label(bar, text="  RS interleaving I").pack(side=tk.LEFT)
         ttk.Spinbox(bar, from_=1, to=8, width=3, textvariable=self.interleave_var,
                     command=self.reload).pack(side=tk.LEFT, padx=(4, 10))
-        ttk.Checkbutton(bar, text="Randomized", variable=self.randomized_var, command=self.reload).pack(side=tk.LEFT)
+        ttk.Label(bar, text="Randomized").pack(side=tk.LEFT)
+        box = ttk.Combobox(bar, textvariable=self.randomized_var, values=("Auto", "Yes", "No"), width=6,
+                           state="readonly")
+        box.pack(side=tk.LEFT, padx=(4, 0))
+        box.bind("<<ComboboxSelected>>", lambda _e: self.reload())
         ttk.Checkbutton(bar, text="FECF", variable=self.fecf_var, command=self.reload).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(bar, text="Export CSV…", command=self.export_csv).pack(side=tk.RIGHT)
         self.file_var = tk.StringVar(value="No file: press Open… (CADUs starting with the sync marker 1ACFFC1D)")
@@ -139,13 +144,20 @@ class CaduWindow:
         self.root.update_idletasks()
         try:
             interleave = int(self.interleave_var.get())
+            choice = self.randomized_var.get()
+            if choice == "Auto":
+                self.randomized = cd.detect_randomization(self.data, interleave, self.fecf_var.get())
+                how = ("randomized" if self.randomized else "not randomized, already de-randomized") + " (detected)"
+            else:
+                self.randomized = choice == "Yes"
+                how = "randomized" if self.randomized else "not randomized"
             self.rows = [dict(n=k, offset=o, **f) for k, (o, f) in enumerate(
-                cd.decode(self.data, interleave, self.randomized_var.get(), self.fecf_var.get()), start=1)]
+                cd.decode(self.data, interleave, self.randomized, self.fecf_var.get()), start=1)]
         finally:
             self.root.config(cursor="")
         cadu_len = len(cd.ASM) + cd.RS_N * interleave
         self.file_var.set(f"{os.path.basename(self.path)}: {len(self.data)} bytes; CADU {cadu_len} bytes, "
-                          f"transfer frame {cd.RS_K * interleave} bytes (I = {interleave})")
+                          f"transfer frame {cd.RS_K * interleave} bytes (I = {interleave}); codeblocks {how}")
         if self.rows:
             self._set_text(self.summary_text, cd.summary(self.rows, len(self.data), cadu_len))
         else:
@@ -206,7 +218,7 @@ class CaduWindow:
             return
         number = int(selection[0])
         lines = cd.show_cadu(number, self.rows[number - 1], self.data, int(self.interleave_var.get()),
-                             self.randomized_var.get(), self.fecf_var.get(), dump=self.dump_var.get())
+                             self.randomized, self.fecf_var.get(), dump=self.dump_var.get())
         self._set_text(self.detail_text, lines)
 
     def export_csv(self) -> None:

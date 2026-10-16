@@ -18,7 +18,8 @@ counter gaps), master channel counter and CLCW.
     python cadu_decode.py capture.bin -o frames.csv          # every frame to a CSV file
     python cadu_decode.py capture.bin --show 125             # content of CADU number 125
     python cadu_decode.py capture.bin --interleave 4 --fecf  # other frame layout
-    python cadu_decode.py capture.bin --not-randomized       # codeblocks sent in clear
+    python cadu_decode.py capture.bin --randomization no     # codeblocks already de-randomized
+                                                             # (default: detected)
 
 The input is binary, or text with the bytes in hexadecimal (spaces and line
 breaks ignored).
@@ -90,6 +91,27 @@ def clcw(word: bytes) -> dict:
         "farm_b_counter": (value >> 9) & 0x3,
         "report_value": value & 0xFF,
     }
+
+
+def detect_randomization(data: bytes, interleave: int = 5, fecf: bool = False, sample: int = 200) -> bool:
+    """Whether the codeblocks of ``data`` are randomized, judged on the first ``sample`` CADUs.
+
+    Both readings are scored: frames with version 0, and master channel counters going up by 1 from a
+    frame to the next. A file whose codeblocks were already de-randomized (as many receivers save
+    them) reads with scrambled virtual channels and counters when de-randomized again, and the
+    other way round.
+    """
+    def score(randomized):
+        rows = []
+        for _offset, fields in decode(data, interleave, randomized, fecf):
+            rows.append(fields)
+            if len(rows) >= sample:
+                break
+        version_ok = sum(1 for r in rows if r["version"] == 0)
+        consecutive = sum(1 for a, b in zip(rows, rows[1:]) if (b["mc_count"] - a["mc_count"]) % 256 == 1)
+        return version_ok + consecutive
+
+    return score(True) >= score(False)
 
 
 def first_header_pointer_text(fhp: int) -> str:
@@ -164,7 +186,8 @@ def summary(rows, data_len: int, cadu_len: int) -> list[str]:
     lines.append("Spacecraft IDs: " + ", ".join(f"{k} ({v} frames)" for k, v in Counter(r["scid"] for r in rows).items()))
     versions = Counter(r["version"] for r in rows)
     if set(versions) != {0}:
-        lines.append(f"Warning: transfer frame versions {dict(versions)}: wrong layout, or try --not-randomized.")
+        lines.append(f"Warning: transfer frame versions {dict(versions)}: wrong interleaving or randomization, "
+                     "or frames with errors.")
 
     jumps, missing = _counter_gaps([r["mc_count"] for r in rows])
     lines.append(f"Master channel counter: {rows[0]['mc_count']} → {rows[-1]['mc_count']}, {jumps} jumps, "
@@ -363,7 +386,10 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("file", help="file of CADUs (binary, or hexadecimal text)")
     ap.add_argument("--interleave", type=int, default=5, help="RS interleaving depth I (default 5: 1279-byte CADU)")
-    ap.add_argument("--not-randomized", action="store_true", help="the codeblocks are not randomized")
+    ap.add_argument("--randomization", choices=("auto", "yes", "no"), default="auto",
+                    help="whether the codeblocks are randomized: auto (default: detected from the frames), yes, "
+                         "or no (already de-randomized, as many receivers save them)")
+    ap.add_argument("--not-randomized", action="store_true", help="same as --randomization no")
     ap.add_argument("--fecf", action="store_true", help="the frames end with a 2-byte FECF")
     ap.add_argument("--frames", type=int, nargs="?", const=50, default=None, metavar="N",
                     help="also list the frames: the first N (default 50; 0: all)")
@@ -377,11 +403,18 @@ def main(argv=None) -> int:
         ap.error("the interleaving depth must be 1 to 8")
 
     data = read_input(args.file)
+    if args.not_randomized or args.randomization == "no":
+        randomized, how = False, "not randomized (option)"
+    elif args.randomization == "yes":
+        randomized, how = True, "randomized (option)"
+    else:
+        randomized = detect_randomization(data, args.interleave, args.fecf)
+        how = ("randomized" if randomized else "not randomized, already de-randomized") + " (detected)"
     rows = [dict(offset=offset, **fields) for offset, fields in
-            decode(data, args.interleave, not args.not_randomized, args.fecf)]
+            decode(data, args.interleave, randomized, args.fecf)]
     cadu_len = len(ASM) + RS_N * args.interleave
     print(f"{args.file}: {len(data)} bytes; CADU {cadu_len} bytes, transfer frame {RS_K * args.interleave} "
-          f"bytes (I = {args.interleave})")
+          f"bytes (I = {args.interleave}); codeblocks {how}")
     if not rows:
         print("No sync marker 1ACFFC1D found.")
         return 1
@@ -392,7 +425,7 @@ def main(argv=None) -> int:
             ap.error(str(exc))
         for number in numbers:
             print()
-            print("\n".join(show_cadu(number, rows[number - 1], data, args.interleave, not args.not_randomized,
+            print("\n".join(show_cadu(number, rows[number - 1], data, args.interleave, randomized,
                                       args.fecf, dump=not args.no_dump)))
         return 0
     print("\n".join(summary(rows, len(data), cadu_len)))

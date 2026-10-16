@@ -89,3 +89,12 @@ def test_parse_selection():
     assert cd.parse_selection("2,4-6,last", 10) == [2, 4, 5, 6, 10]
     with pytest.raises(ValueError):
         cd.parse_selection("11", 10)
+
+
+def test_randomization_detected():
+    clear = b"".join(_cadu(k, k, vcid=1 if k % 2 else 7, randomized=False) for k in range(20))
+    scrambled = b"".join(_cadu(k, k, vcid=1 if k % 2 else 7) for k in range(20))
+    assert cd.detect_randomization(clear) is False
+    assert cd.detect_randomization(scrambled) is True
+    # Read the wrong way the virtual channels come out with the top bit inverted: 1 -> 5, 7 -> 3.
+    assert {f["vcid"] for _o, f in cd.decode(clear, randomized=True)} == {5, 3}
