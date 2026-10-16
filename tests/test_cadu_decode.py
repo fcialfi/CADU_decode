@@ -1,3 +1,5 @@
+import pytest
+
 import cadu_decode as cd
 
 
@@ -61,3 +63,29 @@ def test_summary_of_virtual_channels(tmp_path, capsys):
     rows = [dict(offset=o, **f) for o, f in cd.decode(path.read_bytes())]
     assert cd._counter_gaps([255, 0, 2]) == (1, 1)  # wrap at 256
     assert len(cd.frame_lines(rows)) == 6
+
+
+def test_show_cadu_with_packets():
+    # FHP 10: a packet of APID 100 (20 bytes) then one of APID 101 running into the next frame.
+    frame = bytearray(1115)
+    frame[0:6] = bytes.fromhex("0EEF") + bytes([1, 7]) + (0x1800 | 10).to_bytes(2, "big")
+    frame[16:22] = bytes.fromhex("0864C005") + (20 - 7).to_bytes(2, "big")
+    frame[36:42] = bytes.fromhex("08654006") + (3000 - 7).to_bytes(2, "big")
+    frame[-4:] = bytes.fromhex("01040000")
+    data = cd.ASM + cd._xor(bytes(frame) + bytes(160), cd.pseudo_random_sequence(1275))
+    packets = cd.packet_headers(bytes(frame[6:1111]), 10)
+    assert [(p["apid"], p["sequence_count"], p["length"], p["continues"]) for p in packets] == [
+        (100, 5, 20, False), (101, 6, 3000, True)]
+    assert cd.packet_headers(bytes(10), 0x7FE) == []
+    (offset, fields), = cd.decode(data)
+    text = "\n".join(cd.show_cadu(1, dict(offset=offset, **fields), data, 5, True, False))
+    assert "Spacecraft ID" in text and "0011101110" in text
+    assert "continues in the next frame" in text
+    assert "Reed-Solomon check symbols at byte 1115" in text
+
+
+def test_parse_selection():
+    assert cd.parse_selection("5", 10) == [5]
+    assert cd.parse_selection("2,4-6,last", 10) == [2, 4, 5, 6, 10]
+    with pytest.raises(ValueError):
+        cd.parse_selection("11", 10)

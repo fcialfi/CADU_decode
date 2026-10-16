@@ -16,6 +16,7 @@ counter gaps), master channel counter and CLCW.
     python cadu_decode.py capture.bin                        # summary
     python cadu_decode.py capture.bin --frames               # and the first 50 frames
     python cadu_decode.py capture.bin -o frames.csv          # every frame to a CSV file
+    python cadu_decode.py capture.bin --show 125             # content of CADU number 125
     python cadu_decode.py capture.bin --interleave 4 --fecf  # other frame layout
     python cadu_decode.py capture.bin --not-randomized       # codeblocks sent in clear
 
@@ -47,6 +48,10 @@ def pseudo_random_sequence(length: int) -> bytes:
             register = ((register << 1) | feedback) & 0xFF
         out.append(byte)
     return bytes(out)
+
+
+def _xor(a: bytes, b: bytes) -> bytes:
+    return (int.from_bytes(a, "big") ^ int.from_bytes(b[:len(a)], "big")).to_bytes(len(a), "big")
 
 
 def primary_header(frame: bytes) -> dict:
@@ -112,26 +117,30 @@ def decode(data: bytes, interleave: int = 5, randomized: bool = True, fecf: bool
     prn = pseudo_random_sequence(codeblock_len) if randomized else None
     pos = data.find(ASM)
     while pos >= 0 and pos + cadu_len <= len(data):
-        codeblock = data[pos + len(ASM):pos + cadu_len]
-        if prn is not None:
-            codeblock = bytes(a ^ b for a, b in zip(codeblock, prn))
-        frame = codeblock[:frame_len]
-        fields = primary_header(frame)
+        base = pos + len(ASM)
+
+        def read(start, end):
+            # Only the bytes read are de-randomized: fast on files of many CADUs.
+            raw = data[base + start:base + end]
+            return _xor(raw, prn[start:end]) if prn is not None else raw
+
+        fields = primary_header(read(0, 6))
         trailer = frame_len - (2 if fecf else 0)
         if fields["ocf_flag"]:
-            fields.update(clcw(frame[trailer - 4:trailer]))
+            fields.update(clcw(read(trailer - 4, trailer)))
         if fecf:
-            fields["fecf"] = frame[-2:].hex().upper()
+            fields["fecf"] = read(frame_len - 2, frame_len).hex().upper()
         yield pos, fields
         # The next CADU normally starts right after; otherwise search the next sync marker.
         nxt = pos + cadu_len
         pos = nxt if data[nxt:nxt + len(ASM)] == ASM else data.find(ASM, nxt)
 
 
-def _table(rows) -> list[str]:
-    """Rows of values as aligned text lines (first row: headings)."""
+def _table(rows, left: int = 0) -> list[str]:
+    """Rows of values as aligned text lines (first row: headings); the first ``left`` columns left-aligned."""
     widths = [max(len(str(row[c])) for row in rows) for c in range(len(rows[0]))]
-    return ["  ".join(str(v).rjust(w) for v, w in zip(row, widths)) for row in rows]
+    return ["  ".join(str(v).ljust(w) if c < left else str(v).rjust(w)
+                      for c, (v, w) in enumerate(zip(row, widths))).rstrip() for row in rows]
 
 
 def _counter_gaps(counts) -> tuple[int, int]:
@@ -207,6 +216,149 @@ def frame_lines(rows) -> list[str]:
     return _table(table)
 
 
+PRIMARY_HEADER_FIELDS = (  # (key, name, bits)
+    ("version", "Transfer Frame Version", 2), ("scid", "Spacecraft ID", 10), ("vcid", "Virtual Channel ID", 3),
+    ("ocf_flag", "OCF Flag", 1), ("mc_count", "Master Channel Frame Count", 8),
+    ("vc_count", "Virtual Channel Frame Count", 8), ("sec_header_flag", "Secondary Header Flag", 1),
+    ("sync_flag", "Synch Flag", 1), ("packet_order_flag", "Packet Order Flag", 1),
+    ("segment_length_id", "Segment Length ID", 2), ("first_header_pointer", "First Header Pointer", 11),
+)
+CLCW_FIELDS = (
+    ("clcw_type", "Control Word Type", 1), ("clcw_version", "CLCW Version", 2), ("clcw_status", "Status Field", 3),
+    ("cop_in_effect", "COP in Effect", 2), ("clcw_vcid", "Virtual Channel ID", 6), (None, "Spare", 2),
+    ("no_rf_available", "No RF Available", 1), ("no_bit_lock", "No Bit Lock", 1), ("lockout", "Lockout", 1),
+    ("wait", "Wait", 1), ("retransmit", "Retransmit", 1), ("farm_b_counter", "FARM-B Counter", 2),
+    (None, "Spare", 1), ("report_value", "Report Value", 8),
+)
+
+
+def parse_selection(text: str, count: int) -> list[int]:
+    """CADU numbers (1-based) of a selection like "5", "5,8" or "10-12"; "last" is the last one."""
+    numbers = []
+    for part in text.replace(" ", "").split(","):
+        part = part.replace("last", str(count))
+        first, _, last = part.partition("-")
+        lo, hi = int(first), int(last or first)
+        if not 1 <= lo <= hi <= count:
+            raise ValueError(f"CADU {part} is not between 1 and {count}")
+        numbers += range(lo, hi + 1)
+    return numbers
+
+
+def codeblock_at(data: bytes, offset: int, interleave: int = 5, randomized: bool = True) -> tuple[bytes, bytes]:
+    """(CADU as received, de-randomized codeblock) of the CADU starting at ``offset``."""
+    cadu = data[offset:offset + len(ASM) + RS_N * interleave]
+    codeblock = cadu[len(ASM):]
+    if randomized:
+        codeblock = _xor(codeblock, pseudo_random_sequence(len(codeblock)))
+    return cadu, codeblock
+
+
+def packet_headers(data_field: bytes, fhp: int) -> list[dict]:
+    """Space Packet primary headers that start in a frame data field, from the First Header Pointer."""
+    if fhp in (0x7FE, 0x7FF):
+        return []
+    packets, pos = [], fhp
+    while pos < len(data_field):
+        if pos + 6 > len(data_field):
+            packets.append({"offset": pos, "continues": True})
+            break
+        word = int.from_bytes(data_field[pos:pos + 2], "big")
+        seq = int.from_bytes(data_field[pos + 2:pos + 4], "big")
+        length = int.from_bytes(data_field[pos + 4:pos + 6], "big") + 7  # total, header included
+        packets.append({
+            "offset": pos, "version": word >> 13, "type": (word >> 12) & 1, "sec_header_flag": (word >> 11) & 1,
+            "apid": word & 0x7FF, "sequence_flags": seq >> 14, "sequence_count": seq & 0x3FFF, "length": length,
+            "continues": pos + length > len(data_field),
+        })
+        pos += length
+    return packets
+
+
+def _bit_table(word: int, total_bits: int, fields, values: dict) -> list[str]:
+    rows = [("field", "bits", "binary", "dec", "hex")]
+    shift = total_bits
+    for key, name, bits in fields:
+        shift -= bits
+        raw = (word >> shift) & ((1 << bits) - 1)
+        rows.append((name, bits, format(raw, f"0{bits}b"), values.get(key, raw) if key else raw,
+                     f"{raw:0{(bits + 3) // 4}X}"))
+    return _table(rows, left=1)
+
+
+def hex_dump(block: bytes, marks: list[tuple[int, str]]) -> list[str]:
+    """16 bytes per line with the offset, the section names given as (offset, name) on their own line."""
+    lines, marks = [], sorted(marks)
+    for start in range(0, len(block), 16):
+        for offset, name in marks:
+            if start <= offset < start + 16:
+                lines.append(f"        -- {name} at byte {offset}")
+        chunk = block[start:start + 16]
+        lines.append(f"  {start:5d}  " + " ".join(f"{b:02X}" for b in chunk))
+    return lines
+
+
+def show_cadu(number: int, row: dict, data: bytes, interleave: int, randomized: bool, fecf: bool,
+              dump: bool = True) -> list[str]:
+    """Detailed content of one CADU: sync marker, header and CLCW fields, packets, hex dump of the frame."""
+    cadu, codeblock = codeblock_at(data, row["offset"], interleave, randomized)
+    frame_len = RS_K * interleave
+    frame = codeblock[:frame_len]
+    end = frame_len - (2 if fecf else 0) - (4 if row["ocf_flag"] else 0)
+    start = 6
+    if row["sec_header_flag"]:
+        start += (frame[6] & 0x3F) + 1
+    lines = [f"CADU #{number} at byte {row['offset']} of the file ({len(cadu)} bytes)",
+             f"Sync marker: {cadu[:4].hex().upper()}" + ("" if cadu[:4] == ASM else "  (not 1ACFFC1D)"),
+             f"Codeblock: {'de-randomized' if randomized else 'not randomized'}; transfer frame {frame_len} bytes, "
+             f"RS check symbols {len(codeblock) - frame_len} bytes",
+             "",
+             f"Primary header (bytes 0-5): {frame[:6].hex(' ').upper()}"]
+    lines += ["  " + line for line in _bit_table(int.from_bytes(frame[:6], "big"), 48, PRIMARY_HEADER_FIELDS, {})]
+    lines.append(f"  First Header Pointer: {first_header_pointer_text(row['first_header_pointer'])}")
+    if row["sec_header_flag"]:
+        lines.append(f"Secondary header (bytes 6-{start - 1}): {frame[6:start].hex(' ').upper()}")
+    data_field = frame[start:end]
+    lines += ["", f"Data field: bytes {start}-{end - 1} ({len(data_field)} bytes)"]
+    packets = packet_headers(data_field, row["first_header_pointer"])
+    if row["first_header_pointer"] == 0x7FE:
+        lines.append("  idle data only")
+    elif row["first_header_pointer"] == 0x7FF:
+        lines.append("  no packet starts in this frame (continuation of a packet)")
+    else:
+        if row["first_header_pointer"]:
+            lines.append(f"  bytes 0-{row['first_header_pointer'] - 1}: end of a packet started in a previous frame")
+        table = [("at byte", "ver", "type", "SH", "APID", "seq flags", "seq count", "length", "")]
+        for p in packets:
+            if "apid" not in p:
+                table.append((p["offset"], "", "", "", "", "", "", "", "header continues in the next frame"))
+            else:
+                table.append((p["offset"], p["version"], p["type"], p["sec_header_flag"], p["apid"],
+                              f"{p['sequence_flags']:02b}", p["sequence_count"], p["length"],
+                              "continues in the next frame" if p["continues"] else ""))
+        lines += ["  Packets starting in this frame (offsets in the data field, length with header):"]
+        lines += ["  " + line for line in _table(table)]
+    if row["ocf_flag"]:
+        ocf = frame[end:end + 4]
+        lines += ["", f"OCF / CLCW (bytes {end}-{end + 3}): {ocf.hex(' ').upper()}"]
+        lines += ["  " + line for line in _bit_table(int.from_bytes(ocf, "big"), 32, CLCW_FIELDS, {})]
+    if fecf:
+        lines.append(f"FECF (bytes {frame_len - 2}-{frame_len - 1}): {frame[-2:].hex(' ').upper()}")
+    if dump:
+        marks = [(0, "primary header"), (start, "data field")]
+        if row["sec_header_flag"]:
+            marks.append((6, "secondary header"))
+        if row["ocf_flag"]:
+            marks.append((end, "OCF"))
+        if fecf:
+            marks.append((frame_len - 2, "FECF"))
+        marks.append((frame_len, "Reed-Solomon check symbols"))
+        lines += ["", "Codeblock (de-randomized), offsets from the start of the transfer frame:"
+                  if randomized else "Codeblock, offsets from the start of the transfer frame:"]
+        lines += hex_dump(codeblock, marks)
+    return lines
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("file", help="file of CADUs (binary, or hexadecimal text)")
@@ -216,6 +368,10 @@ def main(argv=None) -> int:
     ap.add_argument("--frames", type=int, nargs="?", const=50, default=None, metavar="N",
                     help="also list the frames: the first N (default 50; 0: all)")
     ap.add_argument("-o", "--output", help="write every frame to this CSV file")
+    ap.add_argument("--show", metavar="N",
+                    help="show the content of CADU number N (as in --frames): fields, packets and hex dump; "
+                         "several as 5,8 or 10-12, 'last' for the last one")
+    ap.add_argument("--no-dump", action="store_true", help="with --show: without the hex dump")
     args = ap.parse_args(argv)
     if not 1 <= args.interleave <= 8:
         ap.error("the interleaving depth must be 1 to 8")
@@ -229,6 +385,16 @@ def main(argv=None) -> int:
     if not rows:
         print("No sync marker 1ACFFC1D found.")
         return 1
+    if args.show:
+        try:
+            numbers = parse_selection(args.show, len(rows))
+        except ValueError as exc:
+            ap.error(str(exc))
+        for number in numbers:
+            print()
+            print("\n".join(show_cadu(number, rows[number - 1], data, args.interleave, not args.not_randomized,
+                                      args.fecf, dump=not args.no_dump)))
+        return 0
     print("\n".join(summary(rows, len(data), cadu_len)))
 
     if args.frames is not None:

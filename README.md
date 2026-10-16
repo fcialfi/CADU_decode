@@ -34,6 +34,29 @@ Per un file con molti CADU lo script mostra di default un riepilogo:
 
 L'elenco frame per frame si aggiunge con `--frames` (o tutti i frame in CSV con `-o`).
 
+## Contenuto di un CADU
+
+`--show N` mostra un CADU scelto per numero (lo stesso numero dell'elenco `--frames`; anche `5,8`, `10-12` o
+`last`):
+
+- sync marker e stato del codeblock (de-randomizzato);
+- ogni campo del primary header e della CLCW con numero di bit, valore binario, decimale ed esadecimale;
+- il data field: i pacchetti (Space Packet) che iniziano nel frame, letti dal First Header Pointer, con
+  APID, sequence flags, sequence count e lunghezza, e se proseguono nel frame successivo;
+- il dump esadecimale del codeblock de-randomizzato, con l'inizio di header, data field, OCF e simboli
+  Reed-Solomon segnati (`--no-dump` per toglierlo).
+
+## Finestra
+
+`python cadu_gui.py [file]` apre una finestra (Tkinter, incluso in Python):
+
+- **Open…** carica il file; interleaving, randomizzazione e FECF si cambiano in alto e il file viene riletto;
+- scheda **Summary**: il riepilogo;
+- scheda **Frames**: la tabella dei frame, con filtro per virtual channel, i frame idle nascondibili e
+  **Go to CADU #**; selezionando una riga, sotto compare il contenuto del CADU come con `--show`
+  (con o senza **Hex dump**);
+- **Export CSV…** salva tutti i frame.
+
 ## Uso
 
 Richiede solo Python 3.8 o superiore, senza librerie esterne.
@@ -43,6 +66,8 @@ python cadu_decode.py capture.bin                  # riepilogo
 python cadu_decode.py capture.bin --frames         # riepilogo e primi 50 frame
 python cadu_decode.py capture.bin --frames 0       # riepilogo e tutti i frame
 python cadu_decode.py capture.bin -o frames.csv    # tutti i frame in un file CSV
+python cadu_decode.py capture.bin --show 125       # contenuto del CADU numero 125
+python cadu_gui.py capture.bin                     # finestra
 python cadu_decode.py capture.bin --interleave 4   # altro interleaving (CADU di 4 + 255·I byte)
 python cadu_decode.py capture.bin --fecf           # frame con FECF (2 byte) in coda
 python cadu_decode.py capture.bin --not-randomized # codeblock non randomizzato
