@@ -144,14 +144,11 @@ class SummaryView(Page):
         checked = "rs" in all_rows[0]
         status = Counter(r.get("rs") for r in all_rows)
         bad = [r for r in all_rows if r.get("rs") == "uncorrectable"]
-        breaks = sum(1 for a, b in zip(all_rows, all_rows[1:]) if b["offset"] - a["offset"] != cadu_len)
-        outside = data_len - n * cadu_len
 
         # Tiles.
         tiles = tk.Frame(self.page, bg=BG)
         tiles.pack(fill=tk.X, padx=16, pady=(16, 0))
-        self._tile(tiles, "CADUs", f"{n:,}", f"{cadu_len} bytes each\n{outside} bytes outside, {breaks} sync losses",
-                   BAD if breaks else TEXT)
+        self._tile(tiles, "CADUs", f"{n:,}", f"{cadu_len} bytes each", TEXT)
         if checked:
             fer = len(bad) / n
             self._tile(tiles, "Frame error rate", _fmt_rate(fer), f"{len(bad)} uncorrectable of {n}\n"

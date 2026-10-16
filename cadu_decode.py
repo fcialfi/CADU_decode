@@ -339,9 +339,6 @@ def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50, all_rows=N
     all_rows = rows if all_rows is None else all_rows
     n = len(all_rows)
     lines = [f"CADUs: {n} of {cadu_len} bytes ({n * cadu_len} bytes)"]
-    outside = data_len - n * cadu_len
-    breaks = sum(1 for a, b in zip(all_rows, all_rows[1:]) if b["offset"] - a["offset"] != cadu_len)
-    lines.append(f"Bytes outside the CADUs: {outside}" + (f", sync lost and found again {breaks} times" if breaks else ""))
     lines += reed_solomon_lines(all_rows, max_listed, list_bad=len(rows) == n)
     if len(rows) < n:
         lines.append(f"Analysis below on {len(rows)} frames: {n - len(rows)} uncorrectable frames excluded")
