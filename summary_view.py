@@ -163,11 +163,13 @@ class SummaryView(Page):
                        f"{len(bad)} / {n}", BAD if bad else GOOD)
         else:
             self._tile(tiles, "Reed-Solomon", "not checked", "enable the Reed-Solomon check", MUTED)
-        mc_jumps, mc_missing = cd._counter_gaps([r["mc_count"] for r in rows]) if rows else (0, 0)
-        scids = Counter(r["scid"] for r in rows).most_common()
+        # Header fields read from the good frames only: an uncorrectable frame may have a corrupted header.
+        good = [r for r in rows if r.get("rs") != "uncorrectable"]
+        mc_jumps, mc_missing = cd._counter_gaps([r["mc_count"] for r in good]) if good else (0, 0)
+        scids = Counter(r["scid"] for r in good).most_common()
         self._tile(tiles, "Spacecraft ID", str(scids[0][0]) if scids else "–",
                    (", ".join(f"{k}: {v}" for k, v in scids[1:4]) or "the only one") +
-                   f"\nmaster counter: {mc_missing} missing", WARN if len(scids) > 1 else TEXT)
+                   f"\nmaster counter: {mc_missing} missing", TEXT)
         if excluded:
             tk.Label(self.page, text=f"Analysis on {len(rows):,} frames: {excluded} uncorrectable frames excluded "
                      "(still counted in the frame error rate).", bg=BG, fg=WARN, font=self.f_small).pack(

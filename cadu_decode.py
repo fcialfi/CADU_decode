@@ -355,7 +355,9 @@ def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50, all_rows=N
         lines.append(f"Analysis below on {len(rows)} frames: {n - len(rows)} uncorrectable frames excluded")
     if not rows:
         return lines
-    lines.append("Spacecraft IDs: " + ", ".join(f"{k} ({v} frames)" for k, v in Counter(r["scid"] for r in rows).items()))
+    good = [r for r in rows if r.get("rs") != "uncorrectable"]  # uncorrectable frames: header unreliable
+    lines.append("Spacecraft IDs: " + ", ".join(f"{k} ({v} frames)" for k, v in Counter(r["scid"] for r in good).items())
+                 + (" (uncorrectable frames not counted)" if len(good) < len(rows) else ""))
     versions = Counter(r["version"] for r in rows)
     if set(versions) != {0}:
         lines.append(f"Warning: transfer frame versions {dict(versions)}: wrong interleaving or randomization, "
