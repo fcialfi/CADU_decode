@@ -8,11 +8,13 @@ pseudo-randomizer). With interleaving depth I = 5 a CADU is 4 + 255·5 =
 1279 bytes and the transfer frame 223·5 = 1115 bytes.
 
 For each CADU the script finds the sync marker, de-randomizes the codeblock
-and prints the primary header and, when the frame has one, the Operational
-Control Field (CLCW); the data field is skipped. It also reports the gaps in
-the master and virtual channel frame counters.
+and reads the primary header and, when the frame has one, the Operational
+Control Field (CLCW); the data field is skipped. It prints a summary of the
+file: number of CADUs, spacecraft, virtual channels (frames, idle frames,
+counter gaps), master channel counter and CLCW.
 
-    python cadu_decode.py capture.bin
+    python cadu_decode.py capture.bin                        # summary
+    python cadu_decode.py capture.bin --frames               # and the first 50 frames
     python cadu_decode.py capture.bin -o frames.csv          # every frame to a CSV file
     python cadu_decode.py capture.bin --interleave 4 --fecf  # other frame layout
     python cadu_decode.py capture.bin --not-randomized       # codeblocks sent in clear
@@ -126,14 +128,94 @@ def decode(data: bytes, interleave: int = 5, randomized: bool = True, fecf: bool
         pos = nxt if data[nxt:nxt + len(ASM)] == ASM else data.find(ASM, nxt)
 
 
+def _table(rows) -> list[str]:
+    """Rows of values as aligned text lines (first row: headings)."""
+    widths = [max(len(str(row[c])) for row in rows) for c in range(len(rows[0]))]
+    return ["  ".join(str(v).rjust(w) for v, w in zip(row, widths)) for row in rows]
+
+
+def _counter_gaps(counts) -> tuple[int, int]:
+    """(number of jumps, frames missing) of a sequence of 8-bit frame counters."""
+    jumps = missing = 0
+    for a, b in zip(counts, counts[1:]):
+        step = (b - a) % 256
+        if step != 1:
+            jumps += 1
+            missing += (step - 1) % 256
+    return jumps, missing
+
+
+def summary(rows, data_len: int, cadu_len: int) -> list[str]:
+    """Summary of a file of CADUs: counts, spacecraft, virtual channels, frame counters, CLCW."""
+    n = len(rows)
+    lines = [f"CADUs: {n} of {cadu_len} bytes ({n * cadu_len} bytes)"]
+    outside = data_len - n * cadu_len
+    breaks = sum(1 for a, b in zip(rows, rows[1:]) if b["offset"] - a["offset"] != cadu_len)
+    lines.append(f"Bytes outside the CADUs: {outside}" + (f", sync lost and found again {breaks} times" if breaks else ""))
+    lines.append("Spacecraft IDs: " + ", ".join(f"{k} ({v} frames)" for k, v in Counter(r["scid"] for r in rows).items()))
+    versions = Counter(r["version"] for r in rows)
+    if set(versions) != {0}:
+        lines.append(f"Warning: transfer frame versions {dict(versions)}: wrong layout, or try --not-randomized.")
+
+    jumps, missing = _counter_gaps([r["mc_count"] for r in rows])
+    lines.append(f"Master channel counter: {rows[0]['mc_count']} → {rows[-1]['mc_count']}, {jumps} jumps, "
+                 f"about {missing} frames missing (8-bit counter: gaps modulo 256)")
+
+    lines.append("")
+    lines.append("Virtual channels:")
+    table = [("VC", "frames", "share", "idle", "packet start", "no header", "VCFC first", "VCFC last", "jumps",
+              "missing")]
+    for vc in sorted({r["vcid"] for r in rows}):
+        frames = [r for r in rows if r["vcid"] == vc]
+        vc_jumps, vc_missing = _counter_gaps([r["vc_count"] for r in frames])
+        fhp = Counter(r["first_header_pointer"] for r in frames)
+        table.append((vc, len(frames), f"{100 * len(frames) / n:.1f} %", fhp[0x7FE],
+                      len(frames) - fhp[0x7FE] - fhp[0x7FF], fhp[0x7FF], frames[0]["vc_count"],
+                      frames[-1]["vc_count"], vc_jumps, vc_missing))
+    lines += ["  " + line for line in _table(table)]
+    lines.append("  idle: FHP 7FE (idle data only); packet start: a packet header in the frame; no header: FHP 7FF")
+
+    with_ocf = [r for r in rows if r["ocf_flag"]]
+    lines.append("")
+    if not with_ocf:
+        lines.append("CLCW: no frame with OCF")
+    else:
+        lines.append(f"CLCW: in {len(with_ocf)} frames")
+        for key, label in (("clcw_vcid", "VC"), ("cop_in_effect", "COP in effect"), ("clcw_status", "status"),
+                           ("report_value", "report value")):
+            values = Counter(r[key] for r in with_ocf)
+            lines.append(f"  {label}: " + ", ".join(f"{k} ({v})" for k, v in sorted(values.items())))
+        flags = ", ".join(f"{label} {sum(r[key] for r in with_ocf)}" for key, label in (
+            ("no_rf_available", "No RF available"), ("no_bit_lock", "No bit lock"), ("lockout", "Lockout"),
+            ("wait", "Wait"), ("retransmit", "Retransmit")))
+        lines.append(f"  frames with the flag set: {flags}")
+    return lines
+
+
+def frame_lines(rows) -> list[str]:
+    head = ("#", "offset", "ver", "SCID", "VC", "OCF", "MCFC", "VCFC", "SH", "sync", "order", "seg", "FHP",
+            "CLCW VC", "COP", "lockout", "wait", "retx", "FARM-B", "report")
+    table = [head]
+    for k, r in enumerate(rows, start=1):
+        table.append((
+            k, r["offset"], r["version"], r["scid"], r["vcid"], r["ocf_flag"], r["mc_count"], r["vc_count"],
+            r["sec_header_flag"], r["sync_flag"], r["packet_order_flag"], r["segment_length_id"],
+            first_header_pointer_text(r["first_header_pointer"]),
+            *([r["clcw_vcid"], r["cop_in_effect"], r["lockout"], r["wait"], r["retransmit"], r["farm_b_counter"],
+               r["report_value"]] if r["ocf_flag"] else ["–"] * 7),
+        ))
+    return _table(table)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("file", help="file of CADUs (binary, or hexadecimal text)")
     ap.add_argument("--interleave", type=int, default=5, help="RS interleaving depth I (default 5: 1279-byte CADU)")
     ap.add_argument("--not-randomized", action="store_true", help="the codeblocks are not randomized")
     ap.add_argument("--fecf", action="store_true", help="the frames end with a 2-byte FECF")
+    ap.add_argument("--frames", type=int, nargs="?", const=50, default=None, metavar="N",
+                    help="also list the frames: the first N (default 50; 0: all)")
     ap.add_argument("-o", "--output", help="write every frame to this CSV file")
-    ap.add_argument("--max-rows", type=int, default=50, help="frames printed on screen (default 50, 0: all)")
     args = ap.parse_args(argv)
     if not 1 <= args.interleave <= 8:
         ap.error("the interleaving depth must be 1 to 8")
@@ -142,58 +224,26 @@ def main(argv=None) -> int:
     rows = [dict(offset=offset, **fields) for offset, fields in
             decode(data, args.interleave, not args.not_randomized, args.fecf)]
     cadu_len = len(ASM) + RS_N * args.interleave
-    print(f"{args.file}: {len(data)} bytes, {len(rows)} CADUs of {cadu_len} bytes "
-          f"(frame {RS_K * args.interleave} bytes, I = {args.interleave})")
+    print(f"{args.file}: {len(data)} bytes; CADU {cadu_len} bytes, transfer frame {RS_K * args.interleave} "
+          f"bytes (I = {args.interleave})")
     if not rows:
         print("No sync marker 1ACFFC1D found.")
         return 1
+    print("\n".join(summary(rows, len(data), cadu_len)))
 
-    head = ("#", "offset", "ver", "SCID", "VC", "OCF", "MCFC", "VCFC", "SH", "sync", "order", "seg", "FHP",
-            "CLCW VC", "COP", "lockout", "wait", "retx", "FARM-B", "report")
-    shown = rows if args.max_rows == 0 else rows[:args.max_rows]
-    table = [head]
-    for k, r in enumerate(shown, start=1):
-        table.append((
-            k, r["offset"], r["version"], r["scid"], r["vcid"], r["ocf_flag"], r["mc_count"], r["vc_count"],
-            r["sec_header_flag"], r["sync_flag"], r["packet_order_flag"], r["segment_length_id"],
-            first_header_pointer_text(r["first_header_pointer"]),
-            *([r["clcw_vcid"], r["cop_in_effect"], r["lockout"], r["wait"], r["retransmit"], r["farm_b_counter"],
-               r["report_value"]] if r["ocf_flag"] else ["–"] * 7),
-        ))
-    widths = [max(len(str(row[c])) for row in table) for c in range(len(head))]
-    for row in table:
-        print("  ".join(str(v).rjust(w) for v, w in zip(row, widths)))
-    if len(shown) < len(rows):
-        print(f"... {len(rows) - len(shown)} more frames (--max-rows 0 for all, -o for a CSV file)")
-
-    # Summary: spacecraft, virtual channels, counter gaps, sync losses.
-    print()
-    print("Spacecraft IDs: " + ", ".join(f"{k} ({n})" for k, n in Counter(r["scid"] for r in rows).items()))
-    print("Virtual channels: " + ", ".join(f"VC{k}: {n}" for k, n in sorted(Counter(r["vcid"] for r in rows).items())))
-    jumps = sum(1 for a, b in zip(rows, rows[1:]) if b["offset"] - a["offset"] != cadu_len)
-    mc_gaps = [(a, b) for a, b in zip(rows, rows[1:]) if (b["mc_count"] - a["mc_count"]) % 256 != 1]
-    print(f"Master channel counter gaps: {len(mc_gaps)}" + (
-        "  (first: " + ", ".join(f"{a['mc_count']}→{b['mc_count']}" for a, b in mc_gaps[:5]) + ")" if mc_gaps else ""))
-    last_vc: dict = {}
-    vc_gaps = Counter()
-    for r in rows:
-        prev = last_vc.get(r["vcid"])
-        if prev is not None and (r["vc_count"] - prev) % 256 != 1:
-            vc_gaps[r["vcid"]] += 1
-        last_vc[r["vcid"]] = r["vc_count"]
-    print("Virtual channel counter gaps: " + (", ".join(f"VC{k}: {n}" for k, n in sorted(vc_gaps.items()))
-                                             if vc_gaps else "none"))
-    if jumps:
-        print(f"CADUs not contiguous (data between sync markers): {jumps}")
-    if any(r["version"] != 0 for r in rows):
-        print("Warning: transfer frame version not 0 in some frames: wrong layout, or try --not-randomized.")
+    if args.frames is not None:
+        shown = rows if args.frames == 0 else rows[:args.frames]
+        print()
+        print("\n".join(frame_lines(shown)))
+        if len(shown) < len(rows):
+            print(f"... {len(rows) - len(shown)} more frames (--frames 0 for all, -o for a CSV file)")
 
     if args.output:
         with open(args.output, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=list(dict.fromkeys(k for r in rows for k in r)))
             writer.writeheader()
             writer.writerows(rows)
-        print(f"Frames written to {args.output}")
+        print(f"\nFrames written to {args.output}")
     return 0
 
 
