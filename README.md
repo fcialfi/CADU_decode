@@ -34,6 +34,9 @@ Per un file con molti CADU lo script mostra di default un riepilogo:
   pacchetto, frame senza header (FHP 7FF), primo e ultimo VCFC, salti e frame mancanti;
 - **CLCW**: valori di VC, COP in effect, status e report value, e in quanti frame sono attivi i flag
   No RF available, No bit lock, Lockout, Wait, Retransmit.
+- la **CLCW più frequente** e l'elenco dei CADU con una CLCW diversa (numero, offset, VC, MCFC e campi che
+  cambiano, per esempio `report 8→14`): sono cambiamenti durante i telecomandi o frame con errori, perché il
+  Reed-Solomon non è verificato. Il riepilogo ne elenca 50; `--frames` e `-o` danno tutti i frame.
 
 L'elenco frame per frame si aggiunge con `--frames` (o tutti i frame in CSV con `-o`).
 
@@ -57,7 +60,7 @@ L'elenco frame per frame si aggiunge con `--frames` (o tutti i frame in CSV con 
   viene riletto; accanto al nome del file è scritto se i codeblock sono stati letti come randomizzati;
 - scheda **Summary**: il riepilogo;
 - scheda **Frames**: la tabella dei frame, con filtro per virtual channel, i frame idle nascondibili e
-  **Go to CADU #**; selezionando una riga, sotto compare il contenuto del CADU come con `--show`
+  **Only unusual CLCW** (solo i frame con CLCW diversa dalla più frequente) e **Go to CADU #**; selezionando una riga, sotto compare il contenuto del CADU come con `--show`
   (con o senza **Hex dump**);
 - **Export CSV…** salva tutti i frame.
 

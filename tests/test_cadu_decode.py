@@ -98,3 +98,22 @@ def test_randomization_detected():
     assert cd.detect_randomization(scrambled) is True
     # Read the wrong way the virtual channels come out with the top bit inverted: 1 -> 5, 7 -> 3.
     assert {f["vcid"] for _o, f in cd.decode(clear, randomized=True)} == {5, 3}
+
+
+def test_unusual_clcw_listed(tmp_path, capsys):
+    frames = [_cadu(k, k) for k in range(6)]
+    # CADU 4: CLCW with lockout and report value 9 instead of 01 04 00 00.
+    odd = bytearray(frames[3])
+    prn = cd.pseudo_random_sequence(1275)
+    odd[4 + 1111:4 + 1115] = cd._xor(bytes.fromhex("01042009"), prn[1111:1115])
+    frames[3] = bytes(odd)
+    path = tmp_path / "cadu.bin"
+    path.write_bytes(b"".join(frames))
+    rows = [dict(offset=o, **f) for o, f in cd.decode(path.read_bytes())]
+    usual = cd.usual_clcw(rows)
+    assert (usual["clcw_vcid"], usual["cop_in_effect"], usual["report_value"]) == (1, 1, 0)
+    assert cd.clcw_differences(rows[3], usual) == {"lockout": (0, 1), "report_value": (0, 9)}
+    assert cd.main([str(path)]) == 0
+    text = capsys.readouterr().out
+    assert "CADUs with a different CLCW: 1" in text
+    assert "lockout 0→1, report 0→9" in text

@@ -158,10 +158,14 @@ def decode(data: bytes, interleave: int = 5, randomized: bool = True, fecf: bool
         pos = nxt if data[nxt:nxt + len(ASM)] == ASM else data.find(ASM, nxt)
 
 
-def _table(rows, left: int = 0) -> list[str]:
-    """Rows of values as aligned text lines (first row: headings); the first ``left`` columns left-aligned."""
+def _table(rows, left: int = 0, last_left: bool = False) -> list[str]:
+    """Rows of values as aligned text lines (first row: headings).
+
+    The first ``left`` columns, and the last one with ``last_left``, are left-aligned.
+    """
     widths = [max(len(str(row[c])) for row in rows) for c in range(len(rows[0]))]
-    return ["  ".join(str(v).ljust(w) if c < left else str(v).rjust(w)
+    last = len(widths) - 1
+    return ["  ".join(str(v).ljust(w) if c < left or (last_left and c == last) else str(v).rjust(w)
                       for c, (v, w) in enumerate(zip(row, widths))).rstrip() for row in rows]
 
 
@@ -176,7 +180,27 @@ def _counter_gaps(counts) -> tuple[int, int]:
     return jumps, missing
 
 
-def summary(rows, data_len: int, cadu_len: int) -> list[str]:
+CLCW_KEYS = ("clcw_type", "clcw_version", "clcw_status", "cop_in_effect", "clcw_vcid", "no_rf_available",
+             "no_bit_lock", "lockout", "wait", "retransmit", "farm_b_counter", "report_value")
+CLCW_SHORT = {"clcw_type": "type", "clcw_version": "version", "clcw_status": "status", "cop_in_effect": "COP",
+              "clcw_vcid": "VC", "no_rf_available": "NoRF", "no_bit_lock": "NoLock", "lockout": "lockout",
+              "wait": "wait", "retransmit": "retx", "farm_b_counter": "FARM-B", "report_value": "report"}
+
+
+def usual_clcw(rows):
+    """The most frequent CLCW of the frames (field -> value), None without OCF."""
+    words = Counter(tuple(r[k] for k in CLCW_KEYS) for r in rows if r["ocf_flag"])
+    return dict(zip(CLCW_KEYS, words.most_common(1)[0][0])) if words else None
+
+
+def clcw_differences(row: dict, usual: dict) -> dict:
+    """The CLCW fields of ``row`` that differ from ``usual``: field -> (usual, value)."""
+    if not row["ocf_flag"] or usual is None:
+        return {}
+    return {k: (usual[k], row[k]) for k in CLCW_KEYS if row[k] != usual[k]}
+
+
+def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50) -> list[str]:
     """Summary of a file of CADUs: counts, spacecraft, virtual channels, frame counters, CLCW."""
     n = len(rows)
     lines = [f"CADUs: {n} of {cadu_len} bytes ({n * cadu_len} bytes)"]
@@ -221,6 +245,23 @@ def summary(rows, data_len: int, cadu_len: int) -> list[str]:
             ("no_rf_available", "No RF available"), ("no_bit_lock", "No bit lock"), ("lockout", "Lockout"),
             ("wait", "Wait"), ("retransmit", "Retransmit")))
         lines.append(f"  frames with the flag set: {flags}")
+        usual = usual_clcw(rows)
+        odd = [(k, r, clcw_differences(r, usual)) for k, r in enumerate(rows, start=1)]
+        odd = [item for item in odd if item[2]]
+        lines.append("  most frequent CLCW: " + ", ".join(f"{CLCW_SHORT[k]} {usual[k]}" for k in CLCW_KEYS)
+                     + f" ({len(with_ocf) - len(odd)} frames)")
+        if not odd:
+            lines.append("  every CLCW is the most frequent one")
+        else:
+            lines.append(f"  CADUs with a different CLCW: {len(odd)} (changes while commanding, or frames with "
+                         "errors: the Reed-Solomon code is not checked)")
+            table = [("CADU #", "offset", "VC", "MCFC", "different fields (most frequent → this frame)")]
+            for k, r, diff in odd[:max_listed]:
+                table.append((k, r["offset"], r["vcid"], r["mc_count"],
+                              ", ".join(f"{CLCW_SHORT[f]} {a}→{b}" for f, (a, b) in diff.items())))
+            lines += ["    " + line for line in _table(table, last_left=True)]
+            if len(odd) > max_listed:
+                lines.append(f"    ... {len(odd) - max_listed} more (--frames and -o list every frame)")
     return lines
 
 

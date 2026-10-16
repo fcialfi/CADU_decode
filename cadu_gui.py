@@ -30,6 +30,7 @@ class CaduWindow:
         self.rows: list[dict] = []
         self.path = None
         self.randomized = True
+        self.usual = None
         root.title("CADU Decoder")
         root.geometry("1250x820")
         self.mono = tkfont.nametofont("TkFixedFont").copy()
@@ -71,6 +72,9 @@ class CaduWindow:
         self.idle_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(filters, text="Show idle frames (FHP 7FE)", variable=self.idle_var,
                         command=self.fill_frames).pack(side=tk.LEFT)
+        self.odd_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(filters, text="Only unusual CLCW", variable=self.odd_var,
+                        command=self.fill_frames).pack(side=tk.LEFT, padx=(12, 0))
         ttk.Label(filters, text="   Go to CADU #").pack(side=tk.LEFT)
         self.goto_var = tk.StringVar()
         goto = ttk.Entry(filters, textvariable=self.goto_var, width=8)
@@ -162,6 +166,7 @@ class CaduWindow:
             self._set_text(self.summary_text, cd.summary(self.rows, len(self.data), cadu_len))
         else:
             self._set_text(self.summary_text, ["No sync marker 1ACFFC1D found."])
+        self.usual = cd.usual_clcw(self.rows)
         vcs = sorted({r["vcid"] for r in self.rows})
         self.vc_box.configure(values=[ALL] + [str(v) for v in vcs])
         if self.vc_var.get() not in self.vc_box.cget("values"):
@@ -177,6 +182,8 @@ class CaduWindow:
             if vc != ALL and r["vcid"] != int(vc):
                 continue
             if not self.idle_var.get() and r["first_header_pointer"] == 0x7FE:
+                continue
+            if self.odd_var.get() and not cd.clcw_differences(r, self.usual):
                 continue
             yield r
 
@@ -208,6 +215,7 @@ class CaduWindow:
         if not self.tree.exists(str(number)):  # hidden by the filters
             self.vc_var.set(ALL)
             self.idle_var.set(True)
+            self.odd_var.set(False)
             self.fill_frames()
         self.tree.selection_set(str(number))
         self.tree.see(str(number))
