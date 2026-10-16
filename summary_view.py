@@ -266,7 +266,8 @@ class SummaryView(Page):
                  "uncorrectable frame).  Resyncs: packet stream broken with no frame missing.", bg=BG, fg=MUTED,
                  font=self.f_small).pack(anchor="w", padx=16, pady=(4, 0))
 
-        self._section("Packets per APID", "sequence count gaps: with no frame lost in between, and at lost frames")
+        self._section("Packets per APID", "missing: forward jumps of the sequence count, with no frame lost in "
+                      "between or at lost frames; back jumps: the count goes back (another stretch of data)")
         table = []
         for a in stats["apids"]:
             idle = a["apid"] == cd.IDLE_APID
@@ -275,10 +276,10 @@ class SummaryView(Page):
             table.append((f"{a['apid']}" + (" (idle)" if idle else ""), a["vc"], f"{a['packets']:,}",
                           f"{a['bytes']:,}", length, a["first_seq"], a["last_seq"],
                           "–" if idle else a["missing"], "–" if idle else a["missing_lost_frames"],
-                          "–" if idle else a["repeated"]))
+                          "–" if idle else a["back_jumps"], "–" if idle else a["repeated"]))
         tree = self._table((("APID", 90), ("VC", 50), ("Packets", 90), ("Bytes", 110), ("Length", 80),
                             ("Seq first", 80), ("Seq last", 80), ("Missing (no frame lost)", 170),
-                            ("Missing at lost frames", 160), ("Repeated", 80)), table)
+                            ("Missing at lost frames", 160), ("Back jumps", 85), ("Repeated", 80)), table)
         for item, a in zip(tree.get_children(), stats["apids"]):
             if a["apid"] != cd.IDLE_APID and a["missing"]:
                 tree.item(item, tags=("gap",))

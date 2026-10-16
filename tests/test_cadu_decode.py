@@ -253,3 +253,11 @@ def test_packets_rebuilt(tmp_path, capsys):
     assert (out / "apid_0051.bin").read_bytes() == b"".join(p for p in stream if p[1] == 51)
     assert len((out / "packets.csv").read_text().splitlines()) == 1 + 40 + 21
     assert not (out / "apid_2047.bin").exists()
+
+
+def test_sequence_count_going_back():
+    # APID 46: 100..119, then back to 50..59 (another stretch of data): a back jump, nothing missing.
+    stream = [_packet(46, c, 100) for c in list(range(100, 120)) + list(range(50, 60))]
+    data = b"".join(_frames_from_stream(stream, 1, 0, 0))
+    (a,) = [a for a in cd.packet_statistics(data, cd.decode_all(data))["apids"] if a["apid"] == 46]
+    assert (a["back_jumps"], a["gaps"], a["missing"], a["missing_lost_frames"]) == (1, 0, 0, 0)

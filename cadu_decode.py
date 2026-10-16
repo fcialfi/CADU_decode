@@ -479,6 +479,9 @@ def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool =
                       max_gaps: int = 2000, progress=None) -> dict:
     """Packets of the file per virtual channel and per APID, with the gaps of the sequence counters.
 
+    A counter that goes back (by more than half its range: a jump of more than 8192 forward is read as one
+    back) is counted as a back jump, not as packets missing: the packets of another stretch of time
+    (e.g. a recorder dump after the real-time data, or dumped in blocks).
     Returns {"vcs": per VC counts (see iter_packets), "apids": one dict per (APID, VC), "gaps": the gaps
     of a sequence counter inside a chain (nothing lost in the frames: the packets missing never reached
     this VC; for each, the VCs where the missing counts were found), at most ``max_gaps``}.
@@ -496,13 +499,15 @@ def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool =
             a = apids[(apid, vc)] = {"apid": apid, "vc": vc, "packets": 0, "bytes": 0, "min_length": length,
                                      "max_length": length, "first_seq": seq, "last_seq": seq, "gaps": 0,
                                      "missing": 0, "gaps_lost_frames": 0, "missing_lost_frames": 0,
-                                     "repeated": 0, "sec_header": sec, "_chain": chain, "_frame": frame}
+                                     "repeated": 0, "back_jumps": 0, "sec_header": sec, "_chain": chain, "_frame": frame}
             seqs[(apid, vc)] = array("H")
         else:
             step = (seq - a["last_seq"]) % SEQ_MOD
             if apid != IDLE_APID and step != 1:
                 if step == 0:
                     a["repeated"] += 1
+                elif step > SEQ_MOD // 2:  # the counter goes back: another stretch of data, not packets lost
+                    a["back_jumps"] += 1
                 elif chain == a["_chain"]:
                     a["gaps"] += 1
                     a["missing"] += step - 1
@@ -553,7 +558,7 @@ def packet_lines(stats: dict, max_listed: int = 50) -> list[str]:
                  "resyncs: packet stream broken with no frame missing")
     lines.append("")
     table = [("APID", "VC", "packets", "bytes", "length", "seq first", "seq last", "gaps", "missing",
-              "at lost frames", "repeated")]
+              "at lost frames", "back jumps", "repeated")]
     for a in stats["apids"]:
         length = str(a["min_length"]) if a["min_length"] == a["max_length"] else \
             f"{a['min_length']}-{a['max_length']}"
@@ -561,10 +566,12 @@ def packet_lines(stats: dict, max_listed: int = 50) -> list[str]:
         table.append((f"{a['apid']}" + (" idle" if idle else ""), a["vc"], a["packets"], a["bytes"], length,
                       a["first_seq"], a["last_seq"], "–" if idle else a["gaps"], "–" if idle else a["missing"],
                       "–" if idle else f"{a['gaps_lost_frames']} ({a['missing_lost_frames']} missing)",
-                      "–" if idle else a["repeated"]))
+                      "–" if idle else a["back_jumps"], "–" if idle else a["repeated"]))
     lines += ["  " + line for line in _table(table)]
     lines.append("  gaps / missing: sequence count jumps with no frame lost in between (packets that never "
-                 "reached this VC); at lost frames: jumps where frames of the VC are missing")
+                 "reached this VC); at lost frames: jumps where frames of the VC are missing;")
+    lines.append("  back jumps: the counter goes back (another stretch of data, e.g. a recorder dump), not counted "
+                 "as missing")
     if stats["gaps"]:
         lines.append("")
         lines.append(f"  Sequence count gaps with no frame lost ({len(stats['gaps'])}"

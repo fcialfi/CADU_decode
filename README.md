@@ -78,7 +78,9 @@ dal primo header successivo. Il riepilogo dà:
   dei frame mancanti, risincronizzazioni (pacchetto che non finisce dove dice l'FHP, senza frame mancanti);
 - per **APID e VC**: pacchetti, byte, lunghezza, primo e ultimo sequence count e i **salti del sequence
   count**, separati in *senza frame persi* (pacchetti che non sono mai arrivati in questo VC: scartati a bordo
-  o mandati su un altro VC) e *ai frame persi* (spiegati dai frame mancanti);
+  o mandati su un altro VC) e *ai frame persi* (spiegati dai frame mancanti); un contatore che **torna indietro** (salto
+  di oltre metà dei 16384 valori) è contato come *back jump* e non come pacchetti mancanti: è un altro tratto
+  di dati, per esempio il dump della memoria dopo il real-time, o un dump fatto a blocchi;
 - l'elenco dei salti senza frame persi: APID, VC, contatori prima e dopo, CADU prima e dopo e i VC dove si
   trovano i contatori mancanti (stesso APID su un altro VC).
 
