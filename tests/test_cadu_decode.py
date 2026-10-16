@@ -139,8 +139,14 @@ def test_reed_solomon_frame_error_rate(tmp_path, capsys):
     text = capsys.readouterr().out
     assert "8 frames without errors, 1 corrected (4 bytes), 1 uncorrectable" in text
     assert "1/10 = 1.000e-01" in text
-    assert "Uncorrectable CADUs: 7" in text
+    assert "Uncorrectable CADUs" not in text  # excluded: not listed
     assert "Analysis below on 9 frames: 1 uncorrectable frames excluded" in text
+    assert "Uncorrectable CADUs: 7" in "\n".join(cd.summary(rows, len(data), 1279))
+    out = tmp_path / "frames.csv"
+    assert cd.main([str(path), "--exclude-bad", "--frames", "0", "-o", str(out)]) == 0
+    listed = capsys.readouterr().out
+    assert "FAIL" not in listed and "corr. 4" in listed
+    assert len(out.read_text().splitlines()) == 1 + 9
     shown = "\n".join(cd.show_cadu(3, rows[2], data, 5, True, False, dump=False))
     # Byte p belongs to codeword p mod 5: 500 -> 1, 1 -> 2, 2 -> 3, 3 -> 4.
     assert "1: 1 corrected, 2: 1 corrected, 3: 1 corrected, 4: 1 corrected, 5: ok" in shown

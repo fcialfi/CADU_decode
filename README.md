@@ -35,7 +35,9 @@ parola corregge fino a 16 byte errati. Per ogni CADU:
 
 Il riepilogo dà i frame senza errori, corretti (e quanti byte), non correggibili, la **FER** (frame non
 correggibili / tutti) e la quota di frame con errori prima della correzione, con l'elenco dei CADU non
-correggibili. `--exclude-bad` esclude dall'analisi (virtual channel, contatori, CLCW) i frame non correggibili;
+correggibili. `--exclude-bad` esclude i frame non correggibili dall'analisi (virtual channel, contatori, CLCW) e da tutti gli
+elenchi: numeri dei CADU non correggibili, `--frames`, tabella della finestra ed export CSV (restano contati
+nella FER);
 `--no-rs` salta il controllo. Con numpy installato il controllo è veloce (circa 0,3 s ogni 1000 CADU); senza
 numpy funziona ma è molto più lento.
 

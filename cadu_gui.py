@@ -231,7 +231,9 @@ class CaduWindow:
                 cd.first_header_pointer_text(r["first_header_pointer"]), r["segment_length_id"], r["ocf_flag"],
                 *clcw, cd.rs_text(r)))
             shown += 1
-        self.count_var.set(f"{shown} of {len(self.rows)} frames")
+        analysed = len(self._analysed())
+        excluded = len(self.rows) - analysed
+        self.count_var.set(f"{shown} of {analysed} frames" + (f" ({excluded} excluded)" if excluded else ""))
 
     def goto(self) -> None:
         text = self.goto_var.get().strip()
@@ -270,7 +272,7 @@ class CaduWindow:
                                             filetypes=[("CSV", "*.csv")])
         if not path:
             return
-        rows = self.rows
+        rows = self._analysed()  # without the uncorrectable frames when they are excluded
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=list(dict.fromkeys(k for r in rows for k in r)))
             writer.writeheader()

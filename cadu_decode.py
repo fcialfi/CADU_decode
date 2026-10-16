@@ -276,8 +276,11 @@ def clcw_differences(row: dict, usual: dict) -> dict:
     return {k: (usual[k], row[k]) for k in CLCW_KEYS if row[k] != usual[k]}
 
 
-def reed_solomon_lines(rows, max_listed: int = 50) -> list[str]:
-    """Reed-Solomon results: frames without errors, corrected, uncorrectable, and the frame error rate."""
+def reed_solomon_lines(rows, max_listed: int = 50, list_bad: bool = True) -> list[str]:
+    """Reed-Solomon results: frames without errors, corrected, uncorrectable, and the frame error rate.
+
+    ``list_bad`` adds the numbers of the uncorrectable CADUs (not when they are excluded).
+    """
     if not rows or "rs" not in rows[0]:
         return ["Reed-Solomon: not checked"]
     n = len(rows)
@@ -290,7 +293,7 @@ def reed_solomon_lines(rows, max_listed: int = 50) -> list[str]:
         f"  Frame error rate (uncorrectable / all): {len(bad)}/{n} = {len(bad) / n:.3e} ({100 * len(bad) / n:.3f} %)",
         f"  Frames with errors before correction: {(status['corrected'] + len(bad)) / n:.3e}",
     ]
-    if bad:
+    if bad and list_bad:
         numbers = ", ".join(str(r["n"]) for r in bad[:max_listed])
         lines.append(f"  Uncorrectable CADUs: {numbers}" + (f" ... ({len(bad) - max_listed} more)"
                                                               if len(bad) > max_listed else ""))
@@ -309,7 +312,7 @@ def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50, all_rows=N
     outside = data_len - n * cadu_len
     breaks = sum(1 for a, b in zip(all_rows, all_rows[1:]) if b["offset"] - a["offset"] != cadu_len)
     lines.append(f"Bytes outside the CADUs: {outside}" + (f", sync lost and found again {breaks} times" if breaks else ""))
-    lines += reed_solomon_lines(all_rows, max_listed)
+    lines += reed_solomon_lines(all_rows, max_listed, list_bad=len(rows) == n)
     if len(rows) < n:
         lines.append(f"Analysis below on {len(rows)} frames: {n - len(rows)} uncorrectable frames excluded")
     if not rows:
@@ -622,8 +625,9 @@ def main(argv=None) -> int:
         with open(args.output, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=list(dict.fromkeys(k for r in rows for k in r)))
             writer.writeheader()
-            writer.writerows(rows)
-        print(f"\nFrames written to {args.output}")
+            writer.writerows(analysed)
+        print(f"\nFrames written to {args.output}" + (" (uncorrectable frames excluded)"
+                                                       if len(analysed) < len(rows) else ""))
     return 0
 
 
