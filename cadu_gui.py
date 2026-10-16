@@ -193,7 +193,7 @@ class CaduWindow:
         else:
             self._set_text(self.summary_text, ["No sync marker 1ACFFC1D found."])
         self.usual = cd.usual_clcw(self._analysed())
-        vcs = sorted({r["vcid"] for r in self.rows})
+        vcs = sorted({r["vcid"] for r in self._analysed()})  # without the excluded frames
         self.vc_box.configure(values=[ALL] + [str(v) for v in vcs])
         if self.vc_var.get() not in self.vc_box.cget("values"):
             self.vc_var.set(ALL)
