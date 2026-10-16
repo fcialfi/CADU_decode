@@ -18,7 +18,7 @@ COLUMNS = (  # (key, heading, width)
     ("n", "#", 70), ("offset", "Offset", 90), ("scid", "SCID", 55), ("vcid", "VC", 40), ("mc_count", "MCFC", 55),
     ("vc_count", "VCFC", 55), ("fhp", "FHP", 150), ("segment_length_id", "Seg", 40), ("ocf_flag", "OCF", 40),
     ("clcw_vcid", "CLCW VC", 80), ("cop_in_effect", "COP", 45), ("flags", "CLCW flags", 140),
-    ("report_value", "Report", 60),
+    ("report_value", "Report", 60), ("rs", "RS", 75),
 )
 ALL = "All"
 
@@ -29,6 +29,7 @@ class CaduWindow:
         self.data = b""
         self.rows: list[dict] = []
         self.path = None
+        self.cadu_len = 0
         self.randomized = True
         self.usual = None
         root.title("CADU Decoder")
@@ -51,6 +52,12 @@ class CaduWindow:
         box.pack(side=tk.LEFT, padx=(4, 0))
         box.bind("<<ComboboxSelected>>", lambda _e: self.reload())
         ttk.Checkbutton(bar, text="FECF", variable=self.fecf_var, command=self.reload).pack(side=tk.LEFT, padx=(8, 0))
+        self.rs_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="Reed-Solomon check", variable=self.rs_var,
+                        command=self.reload).pack(side=tk.LEFT, padx=(12, 0))
+        self.exclude_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="Exclude uncorrectable frames", variable=self.exclude_var,
+                        command=self.refresh).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(bar, text="Export CSV…", command=self.export_csv).pack(side=tk.RIGHT)
         self.file_var = tk.StringVar(value="No file: press Open… (CADUs starting with the sync marker 1ACFFC1D)")
         ttk.Label(root, textvariable=self.file_var, padding=(10, 0)).pack(fill=tk.X)
@@ -70,12 +77,15 @@ class CaduWindow:
         self.vc_box.pack(side=tk.LEFT, padx=(4, 12))
         self.vc_box.bind("<<ComboboxSelected>>", lambda _e: self.fill_frames())
         self.idle_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(filters, text="Show idle frames (FHP 7FE)", variable=self.idle_var,
+        ttk.Checkbutton(filters, text="Idle frames", variable=self.idle_var,
                         command=self.fill_frames).pack(side=tk.LEFT)
+        self.rserr_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(filters, text="Only RS errors", variable=self.rserr_var,
+                        command=self.fill_frames).pack(side=tk.LEFT, padx=(12, 0))
         self.odd_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(filters, text="Only unusual CLCW", variable=self.odd_var,
                         command=self.fill_frames).pack(side=tk.LEFT, padx=(12, 0))
-        ttk.Label(filters, text="   Go to CADU #").pack(side=tk.LEFT)
+        ttk.Label(filters, text="   Go to #").pack(side=tk.LEFT)
         self.goto_var = tk.StringVar()
         goto = ttk.Entry(filters, textvariable=self.goto_var, width=8)
         goto.pack(side=tk.LEFT, padx=4)
@@ -155,18 +165,34 @@ class CaduWindow:
             else:
                 self.randomized = choice == "Yes"
                 how = "randomized" if self.randomized else "not randomized"
-            self.rows = [dict(n=k, offset=o, **f) for k, (o, f) in enumerate(
-                cd.decode(self.data, interleave, self.randomized, self.fecf_var.get()), start=1)]
+            name = os.path.basename(self.path)
+
+            def progress(done, total):
+                self.file_var.set(f"{name}: Reed-Solomon check, {done} of {total} CADUs...")
+                self.root.update_idletasks()
+
+            self.rows = cd.decode_all(self.data, interleave, self.randomized, self.fecf_var.get(),
+                                      reed_solomon=self.rs_var.get(), progress=progress)
         finally:
             self.root.config(cursor="")
-        cadu_len = len(cd.ASM) + cd.RS_N * interleave
-        self.file_var.set(f"{os.path.basename(self.path)}: {len(self.data)} bytes; CADU {cadu_len} bytes, "
+        self.cadu_len = len(cd.ASM) + cd.RS_N * interleave
+        self.file_var.set(f"{os.path.basename(self.path)}: {len(self.data)} bytes; CADU {self.cadu_len} bytes, "
                           f"transfer frame {cd.RS_K * interleave} bytes (I = {interleave}); codeblocks {how}")
+        self.refresh()
+
+    def _analysed(self):
+        if self.exclude_var.get():
+            return [r for r in self.rows if r.get("rs") != "uncorrectable"]
+        return self.rows
+
+    def refresh(self) -> None:
+        """Summary and frame table of the frames analysed (without the uncorrectable ones when excluded)."""
         if self.rows:
-            self._set_text(self.summary_text, cd.summary(self.rows, len(self.data), cadu_len))
+            self._set_text(self.summary_text, cd.summary(self._analysed(), len(self.data), self.cadu_len,
+                                                         all_rows=self.rows))
         else:
             self._set_text(self.summary_text, ["No sync marker 1ACFFC1D found."])
-        self.usual = cd.usual_clcw(self.rows)
+        self.usual = cd.usual_clcw(self._analysed())
         vcs = sorted({r["vcid"] for r in self.rows})
         self.vc_box.configure(values=[ALL] + [str(v) for v in vcs])
         if self.vc_var.get() not in self.vc_box.cget("values"):
@@ -178,8 +204,10 @@ class CaduWindow:
 
     def _visible_rows(self):
         vc = self.vc_var.get()
-        for r in self.rows:
+        for r in self._analysed():
             if vc != ALL and r["vcid"] != int(vc):
+                continue
+            if self.rserr_var.get() and r.get("rs", "ok") == "ok":
                 continue
             if not self.idle_var.get() and r["first_header_pointer"] == 0x7FE:
                 continue
@@ -201,7 +229,7 @@ class CaduWindow:
             self.tree.insert("", tk.END, iid=str(r["n"]), values=(
                 r["n"], r["offset"], r["scid"], r["vcid"], r["mc_count"], r["vc_count"],
                 cd.first_header_pointer_text(r["first_header_pointer"]), r["segment_length_id"], r["ocf_flag"],
-                *clcw))
+                *clcw, cd.rs_text(r)))
             shown += 1
         self.count_var.set(f"{shown} of {len(self.rows)} frames")
 
@@ -216,6 +244,10 @@ class CaduWindow:
             self.vc_var.set(ALL)
             self.idle_var.set(True)
             self.odd_var.set(False)
+            self.rserr_var.set(False)
+            if self.exclude_var.get() and self.rows[number - 1].get("rs") == "uncorrectable":
+                self.exclude_var.set(False)
+                self.refresh()
             self.fill_frames()
         self.tree.selection_set(str(number))
         self.tree.see(str(number))
@@ -226,7 +258,8 @@ class CaduWindow:
             return
         number = int(selection[0])
         lines = cd.show_cadu(number, self.rows[number - 1], self.data, int(self.interleave_var.get()),
-                             self.randomized, self.fecf_var.get(), dump=self.dump_var.get())
+                             self.randomized, self.fecf_var.get(), dump=self.dump_var.get(),
+                             reed_solomon=self.rs_var.get())
         self._set_text(self.detail_text, lines)
 
     def export_csv(self) -> None:
@@ -237,7 +270,7 @@ class CaduWindow:
                                             filetypes=[("CSV", "*.csv")])
         if not path:
             return
-        rows = [{k: v for k, v in r.items() if k != "n"} for r in self.rows]
+        rows = self.rows
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=list(dict.fromkeys(k for r in rows for k in r)))
             writer.writeheader()

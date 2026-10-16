@@ -1,15 +1,16 @@
 import pytest
 
 import cadu_decode as cd
+import rs_ccsds
 
 
-def _cadu(mc, vc, interleave=5, randomized=True, vcid=7, fhp=1):
+def _cadu(mc, vc, interleave=5, randomized=True, vcid=7, fhp=1, clcw=None):
     # Header of the reference frame: SCID 238, VC 7, OCF, segment length ID 3, FHP 1; CLCW 01 04 00 00.
     header = (bytes([0x0E, 0xE0 | (vcid << 1) | 1]) + bytes([mc, vc])
               + (0x1800 | fhp).to_bytes(2, "big"))
     frame_len = 223 * interleave
-    frame = header + bytes(frame_len - 6 - 4) + bytes.fromhex("01040000")
-    codeblock = frame + bytes(32 * interleave)  # check symbols: not checked by the decoder
+    frame = header + bytes(frame_len - 6 - 4) + (clcw or bytes.fromhex("01040000"))
+    codeblock = rs_ccsds.encode_codeblock(frame, interleave)
     if randomized:
         codeblock = bytes(a ^ b for a, b in zip(codeblock, cd.pseudo_random_sequence(len(codeblock))))
     return cd.ASM + codeblock
@@ -42,7 +43,7 @@ def test_not_randomized_and_cli(tmp_path, capsys):
     text = capsys.readouterr().out
     assert "CADUs: 2 of 1279 bytes" in text
     assert "1 jumps, about 1 frames missing" in text
-    assert out.read_text().splitlines()[1].startswith("0,0,238,7,1,1,7")
+    assert out.read_text().splitlines()[1].startswith("1,0,0,238,7,1,1,7")
 
 
 def test_summary_of_virtual_channels(tmp_path, capsys):
@@ -72,7 +73,7 @@ def test_show_cadu_with_packets():
     frame[16:22] = bytes.fromhex("0864C005") + (20 - 7).to_bytes(2, "big")
     frame[36:42] = bytes.fromhex("08654006") + (3000 - 7).to_bytes(2, "big")
     frame[-4:] = bytes.fromhex("01040000")
-    data = cd.ASM + cd._xor(bytes(frame) + bytes(160), cd.pseudo_random_sequence(1275))
+    data = cd.ASM + cd._xor(rs_ccsds.encode_codeblock(bytes(frame), 5), cd.pseudo_random_sequence(1275))
     packets = cd.packet_headers(bytes(frame[6:1111]), 10)
     assert [(p["apid"], p["sequence_count"], p["length"], p["continues"]) for p in packets] == [
         (100, 5, 20, False), (101, 6, 3000, True)]
@@ -103,10 +104,7 @@ def test_randomization_detected():
 def test_unusual_clcw_listed(tmp_path, capsys):
     frames = [_cadu(k, k) for k in range(6)]
     # CADU 4: CLCW with lockout and report value 9 instead of 01 04 00 00.
-    odd = bytearray(frames[3])
-    prn = cd.pseudo_random_sequence(1275)
-    odd[4 + 1111:4 + 1115] = cd._xor(bytes.fromhex("01042009"), prn[1111:1115])
-    frames[3] = bytes(odd)
+    frames[3] = _cadu(3, 3, clcw=bytes.fromhex("01042009"))
     path = tmp_path / "cadu.bin"
     path.write_bytes(b"".join(frames))
     rows = [dict(offset=o, **f) for o, f in cd.decode(path.read_bytes())]
@@ -117,3 +115,49 @@ def test_unusual_clcw_listed(tmp_path, capsys):
     text = capsys.readouterr().out
     assert "CADUs with a different CLCW: 1" in text
     assert "lockout 0→1, report 0→9" in text
+
+
+def _with_errors(cadu: bytes, positions) -> bytes:
+    damaged = bytearray(cadu)
+    for p in positions:
+        damaged[4 + p] ^= 0xA5
+    return bytes(damaged)
+
+
+def test_reed_solomon_frame_error_rate(tmp_path, capsys):
+    frames = [_cadu(k, k) for k in range(10)]
+    frames[2] = _with_errors(frames[2], [1, 2, 3, 500])  # VC and counter bytes hit: corrected
+    frames[6] = _with_errors(frames[6], range(0, 5 * 20, 5))  # 20 errors in codeword 1: uncorrectable
+    data = b"".join(frames)
+    rows = cd.decode_all(data)
+    assert [r["rs"] for r in rows].count("ok") == 8
+    assert (rows[2]["rs"], rows[2]["rs_corrected"], rows[2]["vcid"], rows[2]["mc_count"]) == ("corrected", 4, 7, 2)
+    assert (rows[6]["rs"], rows[6]["rs_failed"]) == ("uncorrectable", 1)
+    path = tmp_path / "cadu.bin"
+    path.write_bytes(data)
+    assert cd.main([str(path), "--exclude-bad"]) == 0
+    text = capsys.readouterr().out
+    assert "8 frames without errors, 1 corrected (4 bytes), 1 uncorrectable" in text
+    assert "1/10 = 1.000e-01" in text
+    assert "Uncorrectable CADUs: 7" in text
+    assert "Analysis below on 9 frames: 1 uncorrectable frames excluded" in text
+    shown = "\n".join(cd.show_cadu(3, rows[2], data, 5, True, False, dump=False))
+    # Byte p belongs to codeword p mod 5: 500 -> 1, 1 -> 2, 2 -> 3, 3 -> 4.
+    assert "1: 1 corrected, 2: 1 corrected, 3: 1 corrected, 4: 1 corrected, 5: ok" in shown
+    assert "bytes corrected at offsets 1, 2, 3, 500" in shown
+
+
+def test_rs_codec():
+    import random
+
+    rng = random.Random(3)
+    data = bytes(rng.randrange(256) for _ in range(223))
+    word = data + rs_ccsds.encode(data)
+    assert rs_ccsds.decode(word) == (word, 0)
+    damaged = bytearray(word)
+    for p in rng.sample(range(255), 16):
+        damaged[p] ^= rng.randrange(1, 256)
+    assert rs_ccsds.decode(bytes(damaged)) == (word, 16)
+    for p in rng.sample(range(255), 4):
+        damaged[p] ^= 0x11
+    assert rs_ccsds.decode(bytes(damaged))[1] == -1

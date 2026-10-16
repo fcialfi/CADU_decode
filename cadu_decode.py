@@ -11,12 +11,15 @@ For each CADU the script finds the sync marker, de-randomizes the codeblock
 and reads the primary header and, when the frame has one, the Operational
 Control Field (CLCW); the data field is skipped. It prints a summary of the
 file: number of CADUs, spacecraft, virtual channels (frames, idle frames,
-counter gaps), master channel counter and CLCW.
+counter gaps), master channel counter and CLCW. The Reed-Solomon code is
+decoded: frames corrected, frames uncorrectable and the frame error rate;
+the fields of a corrected frame are read after the correction.
 
     python cadu_decode.py capture.bin                        # summary
     python cadu_decode.py capture.bin --frames               # and the first 50 frames
     python cadu_decode.py capture.bin -o frames.csv          # every frame to a CSV file
     python cadu_decode.py capture.bin --show 125             # content of CADU number 125
+    python cadu_decode.py capture.bin --exclude-bad          # without the uncorrectable frames
     python cadu_decode.py capture.bin --interleave 4 --fecf  # other frame layout
     python cadu_decode.py capture.bin --randomization no     # codeblocks already de-randomized
                                                              # (default: detected)
@@ -30,6 +33,8 @@ import csv
 import string
 import sys
 from collections import Counter
+
+import rs_ccsds
 
 ASM = bytes.fromhex("1ACFFC1D")
 RS_N, RS_K = 255, 223
@@ -158,6 +163,77 @@ def decode(data: bytes, interleave: int = 5, randomized: bool = True, fecf: bool
         pos = nxt if data[nxt:nxt + len(ASM)] == ASM else data.find(ASM, nxt)
 
 
+def parse_frame(frame: bytes, fecf: bool = False) -> dict:
+    """Fields of a whole transfer frame: primary header, CLCW (with OCF), FECF."""
+    fields = primary_header(frame[:6])
+    trailer = len(frame) - (2 if fecf else 0)
+    if fields["ocf_flag"]:
+        fields.update(clcw(frame[trailer - 4:trailer]))
+    if fecf:
+        fields["fecf"] = frame[-2:].hex().upper()
+    return fields
+
+
+def check_reed_solomon(data: bytes, offsets, interleave: int = 5, randomized: bool = True,
+                       progress=None) -> dict:
+    """Reed-Solomon status of the CADUs at ``offsets``: offset -> (corrected codeblock, symbols per codeword).
+
+    Only the CADUs with errors are listed (the others are error free). A count of -1 marks an
+    uncorrectable codeword. With numpy the error-free codeblocks are found in one pass; without it
+    every codeword is decoded (much slower).
+    """
+    codeblock_len = RS_N * interleave
+    prn = pseudo_random_sequence(codeblock_len) if randomized else None
+
+    def codeblock(offset):
+        raw = data[offset + len(ASM):offset + len(ASM) + codeblock_len]
+        return _xor(raw, prn) if prn is not None else raw
+
+    result = {}
+    offsets = list(offsets)
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+    batch = 2000
+    for start in range(0, len(offsets), batch):
+        part = offsets[start:start + batch]
+        if np is not None:
+            blocks = np.frombuffer(b"".join(codeblock(o) for o in part), dtype=np.uint8).reshape(len(part), -1)
+            suspects = [o for o, bad in zip(part, rs_ccsds.syndromes_nonzero(blocks, interleave)) if bad]
+        else:
+            suspects = part
+        for offset in suspects:
+            fixed, counts = rs_ccsds.codeblock_status(codeblock(offset), interleave)
+            if any(counts):
+                result[offset] = (fixed, counts)
+        if progress is not None:
+            progress(min(start + batch, len(offsets)), len(offsets))
+    return result
+
+
+def decode_all(data: bytes, interleave: int = 5, randomized: bool = True, fecf: bool = False,
+               reed_solomon: bool = True, progress=None) -> list[dict]:
+    """Every CADU as a dict: number n (from 1), offset, frame fields and, with ``reed_solomon``, rs
+    ("ok", "corrected" or "uncorrectable"), rs_corrected (symbols corrected) and rs_failed (codewords
+    not correctable). The fields of a corrected frame are read from the corrected bytes."""
+    rows = [dict(n=k, offset=o, **f) for k, (o, f) in enumerate(decode(data, interleave, randomized, fecf), start=1)]
+    if not reed_solomon:
+        return rows
+    errors = check_reed_solomon(data, [r["offset"] for r in rows], interleave, randomized, progress)
+    for r in rows:
+        fixed, counts = errors.get(r["offset"], (None, [0]))
+        failed = sum(1 for c in counts if c < 0)
+        r["rs_corrected"] = sum(c for c in counts if c > 0)
+        r["rs_failed"] = failed
+        r["rs"] = "uncorrectable" if failed else ("corrected" if r["rs_corrected"] else "ok")
+        if r["rs"] == "corrected":
+            keep = {k: r[k] for k in ("n", "offset", "rs", "rs_corrected", "rs_failed")}
+            r.clear()
+            r.update(keep, **parse_frame(fixed[:RS_K * interleave], fecf))
+    return rows
+
+
 def _table(rows, left: int = 0, last_left: bool = False) -> list[str]:
     """Rows of values as aligned text lines (first row: headings).
 
@@ -200,13 +276,44 @@ def clcw_differences(row: dict, usual: dict) -> dict:
     return {k: (usual[k], row[k]) for k in CLCW_KEYS if row[k] != usual[k]}
 
 
-def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50) -> list[str]:
-    """Summary of a file of CADUs: counts, spacecraft, virtual channels, frame counters, CLCW."""
+def reed_solomon_lines(rows, max_listed: int = 50) -> list[str]:
+    """Reed-Solomon results: frames without errors, corrected, uncorrectable, and the frame error rate."""
+    if not rows or "rs" not in rows[0]:
+        return ["Reed-Solomon: not checked"]
     n = len(rows)
+    status = Counter(r["rs"] for r in rows)
+    corrected = sum(r["rs_corrected"] for r in rows)
+    bad = [r for r in rows if r["rs"] == "uncorrectable"]
+    lines = [
+        f"Reed-Solomon (255,223): {status['ok']} frames without errors, {status['corrected']} corrected "
+        f"({corrected} bytes), {len(bad)} uncorrectable",
+        f"  Frame error rate (uncorrectable / all): {len(bad)}/{n} = {len(bad) / n:.3e} ({100 * len(bad) / n:.3f} %)",
+        f"  Frames with errors before correction: {(status['corrected'] + len(bad)) / n:.3e}",
+    ]
+    if bad:
+        numbers = ", ".join(str(r["n"]) for r in bad[:max_listed])
+        lines.append(f"  Uncorrectable CADUs: {numbers}" + (f" ... ({len(bad) - max_listed} more)"
+                                                              if len(bad) > max_listed else ""))
+    return lines
+
+
+def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50, all_rows=None) -> list[str]:
+    """Summary of a file of CADUs: counts, Reed-Solomon, spacecraft, virtual channels, frame counters, CLCW.
+
+    ``rows`` are the frames analysed; ``all_rows`` every CADU of the file when some were excluded
+    (uncorrectable frames).
+    """
+    all_rows = rows if all_rows is None else all_rows
+    n = len(all_rows)
     lines = [f"CADUs: {n} of {cadu_len} bytes ({n * cadu_len} bytes)"]
     outside = data_len - n * cadu_len
-    breaks = sum(1 for a, b in zip(rows, rows[1:]) if b["offset"] - a["offset"] != cadu_len)
+    breaks = sum(1 for a, b in zip(all_rows, all_rows[1:]) if b["offset"] - a["offset"] != cadu_len)
     lines.append(f"Bytes outside the CADUs: {outside}" + (f", sync lost and found again {breaks} times" if breaks else ""))
+    lines += reed_solomon_lines(all_rows, max_listed)
+    if len(rows) < n:
+        lines.append(f"Analysis below on {len(rows)} frames: {n - len(rows)} uncorrectable frames excluded")
+    if not rows:
+        return lines
     lines.append("Spacecraft IDs: " + ", ".join(f"{k} ({v} frames)" for k, v in Counter(r["scid"] for r in rows).items()))
     versions = Counter(r["version"] for r in rows)
     if set(versions) != {0}:
@@ -246,7 +353,7 @@ def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50) -> list[st
             ("wait", "Wait"), ("retransmit", "Retransmit")))
         lines.append(f"  frames with the flag set: {flags}")
         usual = usual_clcw(rows)
-        odd = [(k, r, clcw_differences(r, usual)) for k, r in enumerate(rows, start=1)]
+        odd = [(r.get("n", k), r, clcw_differences(r, usual)) for k, r in enumerate(rows, start=1)]
         odd = [item for item in odd if item[2]]
         lines.append("  most frequent CLCW: " + ", ".join(f"{CLCW_SHORT[k]} {usual[k]}" for k in CLCW_KEYS)
                      + f" ({len(with_ocf) - len(odd)} frames)")
@@ -254,7 +361,8 @@ def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50) -> list[st
             lines.append("  every CLCW is the most frequent one")
         else:
             lines.append(f"  CADUs with a different CLCW: {len(odd)} (changes while commanding, or frames with "
-                         "errors: the Reed-Solomon code is not checked)")
+                         "errors" + (": the Reed-Solomon code is not checked)" if "rs" not in rows[0] else
+                                     " the Reed-Solomon code could not correct)"))
             table = [("CADU #", "offset", "VC", "MCFC", "different fields (most frequent → this frame)")]
             for k, r, diff in odd[:max_listed]:
                 table.append((k, r["offset"], r["vcid"], r["mc_count"],
@@ -267,17 +375,26 @@ def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50) -> list[st
 
 def frame_lines(rows) -> list[str]:
     head = ("#", "offset", "ver", "SCID", "VC", "OCF", "MCFC", "VCFC", "SH", "sync", "order", "seg", "FHP",
-            "CLCW VC", "COP", "lockout", "wait", "retx", "FARM-B", "report")
+            "CLCW VC", "COP", "lockout", "wait", "retx", "FARM-B", "report", "RS")
     table = [head]
     for k, r in enumerate(rows, start=1):
         table.append((
-            k, r["offset"], r["version"], r["scid"], r["vcid"], r["ocf_flag"], r["mc_count"], r["vc_count"],
+            r.get("n", k), r["offset"], r["version"], r["scid"], r["vcid"], r["ocf_flag"], r["mc_count"], r["vc_count"],
             r["sec_header_flag"], r["sync_flag"], r["packet_order_flag"], r["segment_length_id"],
             first_header_pointer_text(r["first_header_pointer"]),
             *([r["clcw_vcid"], r["cop_in_effect"], r["lockout"], r["wait"], r["retransmit"], r["farm_b_counter"],
                r["report_value"]] if r["ocf_flag"] else ["–"] * 7),
+            rs_text(r),
         ))
     return _table(table)
+
+
+def rs_text(row: dict) -> str:
+    if "rs" not in row:
+        return "–"
+    if row["rs"] == "corrected":
+        return f"corr. {row['rs_corrected']}"
+    return "FAIL" if row["rs"] == "uncorrectable" else "ok"
 
 
 PRIMARY_HEADER_FIELDS = (  # (key, name, bits)
@@ -363,9 +480,22 @@ def hex_dump(block: bytes, marks: list[tuple[int, str]]) -> list[str]:
 
 
 def show_cadu(number: int, row: dict, data: bytes, interleave: int, randomized: bool, fecf: bool,
-              dump: bool = True) -> list[str]:
-    """Detailed content of one CADU: sync marker, header and CLCW fields, packets, hex dump of the frame."""
+              dump: bool = True, reed_solomon: bool = True) -> list[str]:
+    """Detailed content of one CADU: sync marker, Reed-Solomon, header and CLCW fields, packets, hex dump."""
     cadu, codeblock = codeblock_at(data, row["offset"], interleave, randomized)
+    rs_lines = []
+    if reed_solomon:
+        fixed, counts = rs_ccsds.codeblock_status(codeblock, interleave)
+        words = ", ".join(f"{i + 1}: " + ("uncorrectable" if c < 0 else f"{c} corrected" if c else "ok")
+                          for i, c in enumerate(counts))
+        rs_lines.append(f"Reed-Solomon, codewords ({interleave} interleaved): {words}")
+        changed = [i for i in range(len(codeblock)) if fixed[i] != codeblock[i]]
+        if changed:
+            rs_lines.append(f"  bytes corrected at offsets {', '.join(map(str, changed))}; shown corrected below")
+            codeblock = fixed
+        if any(c < 0 for c in counts):
+            rs_lines.append("  uncorrectable: the fields below may be wrong")
+        row = dict(row, **parse_frame(codeblock[:RS_K * interleave], fecf))
     frame_len = RS_K * interleave
     frame = codeblock[:frame_len]
     end = frame_len - (2 if fecf else 0) - (4 if row["ocf_flag"] else 0)
@@ -376,6 +506,7 @@ def show_cadu(number: int, row: dict, data: bytes, interleave: int, randomized: 
              f"Sync marker: {cadu[:4].hex().upper()}" + ("" if cadu[:4] == ASM else "  (not 1ACFFC1D)"),
              f"Codeblock: {'de-randomized' if randomized else 'not randomized'}; transfer frame {frame_len} bytes, "
              f"RS check symbols {len(codeblock) - frame_len} bytes",
+             *rs_lines,
              "",
              f"Primary header (bytes 0-5): {frame[:6].hex(' ').upper()}"]
     lines += ["  " + line for line in _bit_table(int.from_bytes(frame[:6], "big"), 48, PRIMARY_HEADER_FIELDS, {})]
@@ -389,6 +520,9 @@ def show_cadu(number: int, row: dict, data: bytes, interleave: int, randomized: 
         lines.append("  idle data only")
     elif row["first_header_pointer"] == 0x7FF:
         lines.append("  no packet starts in this frame (continuation of a packet)")
+    elif row["first_header_pointer"] >= len(data_field):
+        lines.append(f"  First Header Pointer {row['first_header_pointer']} beyond the data field: not valid "
+                     "(frame with errors?)")
     else:
         if row["first_header_pointer"]:
             lines.append(f"  bytes 0-{row['first_header_pointer'] - 1}: end of a packet started in a previous frame")
@@ -439,6 +573,9 @@ def main(argv=None) -> int:
                     help="show the content of CADU number N (as in --frames): fields, packets and hex dump; "
                          "several as 5,8 or 10-12, 'last' for the last one")
     ap.add_argument("--no-dump", action="store_true", help="with --show: without the hex dump")
+    ap.add_argument("--no-rs", action="store_true", help="do not check the Reed-Solomon code (faster)")
+    ap.add_argument("--exclude-bad", action="store_true",
+                    help="leave the frames the Reed-Solomon code cannot correct out of the analysis")
     args = ap.parse_args(argv)
     if not 1 <= args.interleave <= 8:
         ap.error("the interleaving depth must be 1 to 8")
@@ -451,8 +588,10 @@ def main(argv=None) -> int:
     else:
         randomized = detect_randomization(data, args.interleave, args.fecf)
         how = ("randomized" if randomized else "not randomized, already de-randomized") + " (detected)"
-    rows = [dict(offset=offset, **fields) for offset, fields in
-            decode(data, args.interleave, randomized, args.fecf)]
+    if args.show:  # one CADU: no need to check the whole file
+        rows = decode_all(data, args.interleave, randomized, args.fecf, reed_solomon=False)
+    else:
+        rows = decode_all(data, args.interleave, randomized, args.fecf, reed_solomon=not args.no_rs)
     cadu_len = len(ASM) + RS_N * args.interleave
     print(f"{args.file}: {len(data)} bytes; CADU {cadu_len} bytes, transfer frame {RS_K * args.interleave} "
           f"bytes (I = {args.interleave}); codeblocks {how}")
@@ -467,16 +606,17 @@ def main(argv=None) -> int:
         for number in numbers:
             print()
             print("\n".join(show_cadu(number, rows[number - 1], data, args.interleave, randomized,
-                                      args.fecf, dump=not args.no_dump)))
+                                      args.fecf, dump=not args.no_dump, reed_solomon=not args.no_rs)))
         return 0
-    print("\n".join(summary(rows, len(data), cadu_len)))
+    analysed = [r for r in rows if r.get("rs") != "uncorrectable"] if args.exclude_bad else rows
+    print("\n".join(summary(analysed, len(data), cadu_len, all_rows=rows)))
 
     if args.frames is not None:
-        shown = rows if args.frames == 0 else rows[:args.frames]
+        shown = analysed if args.frames == 0 else analysed[:args.frames]
         print()
         print("\n".join(frame_lines(shown)))
-        if len(shown) < len(rows):
-            print(f"... {len(rows) - len(shown)} more frames (--frames 0 for all, -o for a CSV file)")
+        if len(shown) < len(analysed):
+            print(f"... {len(analysed) - len(shown)} more frames (--frames 0 for all, -o for a CSV file)")
 
     if args.output:
         with open(args.output, "w", newline="", encoding="utf-8") as f:

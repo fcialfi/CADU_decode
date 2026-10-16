@@ -20,7 +20,24 @@ Per ogni CADU lo script:
 - se il frame ha l'OCF, legge la **CLCW**: type, version, status, COP in effect, VCID, No RF available,
   No bit lock, Lockout, Wait, Retransmit, FARM-B counter, report value.
 
-Il data field e i simboli Reed-Solomon non sono letti (nessuna verifica o correzione RS).
+Il codice Reed-Solomon è decodificato (sezione sotto); i pacchetti del data field sono mostrati con `--show`.
+
+## Reed-Solomon e FER
+
+Lo script decodifica il codice Reed-Solomon (255,223) CCSDS (`rs_ccsds.py`: campo con x⁸ + x⁷ + x² + x + 1,
+radici β^112…β^143 con β = α¹¹, base duale di Berlekamp; algoritmo di Berlekamp-Massey come in libfec). Ogni
+codeblock contiene I parole interleaved byte per byte (la parola i è fatta dai byte i, i + I, i + 2I, …); ogni
+parola corregge fino a 16 byte errati. Per ogni CADU:
+
+- **ok**: nessun errore;
+- **corretto**: errori corretti; i campi del frame sono letti dai byte corretti;
+- **non correggibile** (FAIL): più di 16 byte errati in almeno una parola; i campi possono essere sbagliati.
+
+Il riepilogo dà i frame senza errori, corretti (e quanti byte), non correggibili, la **FER** (frame non
+correggibili / tutti) e la quota di frame con errori prima della correzione, con l'elenco dei CADU non
+correggibili. `--exclude-bad` esclude dall'analisi (virtual channel, contatori, CLCW) i frame non correggibili;
+`--no-rs` salta il controllo. Con numpy installato il controllo è veloce (circa 0,3 s ogni 1000 CADU); senza
+numpy funziona ma è molto più lento.
 
 ## Riepilogo
 
@@ -45,7 +62,8 @@ L'elenco frame per frame si aggiunge con `--frames` (o tutti i frame in CSV con 
 `--show N` mostra un CADU scelto per numero (lo stesso numero dell'elenco `--frames`; anche `5,8`, `10-12` o
 `last`):
 
-- sync marker e stato del codeblock (de-randomizzato);
+- sync marker, stato del codeblock (de-randomizzato) e Reed-Solomon di ogni parola, con gli offset dei byte corretti
+  (il contenuto è mostrato corretto);
 - ogni campo del primary header e della CLCW con numero di bit, valore binario, decimale ed esadecimale;
 - il data field: i pacchetti (Space Packet) che iniziano nel frame, letti dal First Header Pointer, con
   APID, sequence flags, sequence count e lunghezza, e se proseguono nel frame successivo;
@@ -56,17 +74,20 @@ L'elenco frame per frame si aggiunge con `--frames` (o tutti i frame in CSV con 
 
 `python cadu_gui.py [file]` apre una finestra (Tkinter, incluso in Python):
 
+- **Reed-Solomon check** e **Exclude uncorrectable frames** in alto; la colonna RS dice ok, corr. n (byte
+  corretti) o FAIL;
 - **Open…** carica il file; interleaving, randomizzazione (Auto / Yes / No) e FECF si cambiano in alto e il file
   viene riletto; accanto al nome del file è scritto se i codeblock sono stati letti come randomizzati;
 - scheda **Summary**: il riepilogo;
 - scheda **Frames**: la tabella dei frame, con filtro per virtual channel, i frame idle nascondibili e
-  **Only unusual CLCW** (solo i frame con CLCW diversa dalla più frequente) e **Go to CADU #**; selezionando una riga, sotto compare il contenuto del CADU come con `--show`
+  **Only RS errors** (frame corretti o non correggibili), **Only unusual CLCW** (solo i frame con CLCW diversa
+  dalla più frequente) e **Go to CADU #**; selezionando una riga, sotto compare il contenuto del CADU come con `--show`
   (con o senza **Hex dump**);
 - **Export CSV…** salva tutti i frame.
 
 ## Uso
 
-Richiede solo Python 3.8 o superiore, senza librerie esterne.
+Richiede Python 3.8 o superiore; numpy (`pip install numpy`) è consigliato per un controllo Reed-Solomon veloce.
 
 ```
 python cadu_decode.py capture.bin                  # riepilogo
@@ -74,6 +95,7 @@ python cadu_decode.py capture.bin --frames         # riepilogo e primi 50 frame
 python cadu_decode.py capture.bin --frames 0       # riepilogo e tutti i frame
 python cadu_decode.py capture.bin -o frames.csv    # tutti i frame in un file CSV
 python cadu_decode.py capture.bin --show 125       # contenuto del CADU numero 125
+python cadu_decode.py capture.bin --exclude-bad    # senza i frame non correggibili
 python cadu_gui.py capture.bin                     # finestra
 python cadu_decode.py capture.bin --interleave 4   # altro interleaving (CADU di 4 + 255·I byte)
 python cadu_decode.py capture.bin --fecf           # frame con FECF (2 byte) in coda
