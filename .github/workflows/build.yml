@@ -1,0 +1,39 @@
+name: Build
+
+# Tests, then CADU-Decoder.exe for Windows, at every push to main (or by hand
+# from the Actions tab). The executable is in the artifact "CADU-Decoder"
+# of the run; a tag v* also attaches it to a GitHub release.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller pytest
+      - name: Tests
+        run: pytest -q
+      - name: Build CADU-Decoder.exe
+        run: pyinstaller --noconfirm cadu_gui.spec
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CADU-Decoder
+          path: dist/CADU-Decoder.exe
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/CADU-Decoder.exe

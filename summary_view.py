@@ -182,8 +182,7 @@ class SummaryView(Page):
             edges_bad = sum(1 for r in all_rows[:cut] + all_rows[n - cut:] if r["rs"] == "uncorrectable")
             core_bad = sum(1 for r in core if r["rs"] == "uncorrectable")
             self._section("Reed-Solomon errors along the file",
-                          "position in the file = time in the pass; shaded: first and last 5 %.  Drag or mouse "
-                          "wheel: zoom; right click: whole file; double click: open the CADU")
+                          "position in the file = time in the pass; shaded: first and last 5 %")
             card = self._card()
             card.pack(fill=tk.X, padx=16)
             self.chart = tk.Canvas(card, height=240, bg=CARD, highlightthickness=0)
@@ -193,6 +192,8 @@ class SummaryView(Page):
                     f"In between: {core_bad} of {len(core)}, frame error rate {_fmt_rate(core_bad / len(core))}."
                     if core else "")
             tk.Label(self.page, text=text, bg=BG, fg=TEXT, font=self.f_small).pack(anchor="w", padx=16, pady=(4, 0))
+            tk.Label(self.page, text="Chart: drag or mouse wheel to zoom, right click for the whole file, double "
+                     "click to open the CADU.", bg=BG, fg=MUTED, font=self.f_small).pack(anchor="w", padx=16)
 
         # Virtual channels.
         self._section("Virtual channels", "idle: FHP 7FE; packet start: a packet header in the frame; "

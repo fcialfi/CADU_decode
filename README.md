@@ -100,6 +100,17 @@ L'elenco frame per frame si aggiunge con `--frames` (o tutti i frame in CSV con 
   i byte corretti evidenziati (**Hex dump** per mostrarlo o no; **Copy as text** copia la versione testuale);
 - **Export CSV…** salva tutti i frame.
 
+## Eseguibile per Windows
+
+`CADU-Decoder.exe` è la finestra in un unico file: non serve Python sul PC. Si apre con doppio clic; trascinando un
+file di CADU sull'icona lo apre subito. Si chiude con **Exit**, Ctrl+Q o la X della finestra.
+
+- **Da GitHub**: a ogni push su `main` la action *Build* esegue i test e crea l'eseguibile; si scarica dalla pagina
+  della run (scheda Actions, artifact *CADU-Decoder*, uno zip con dentro l'exe). Un tag `v…` lo allega anche a una
+  release.
+- **In locale**: doppio clic su `build.bat` (crea `.venv` con numpy e PyInstaller la prima volta) →
+  `dist\CADU-Decoder.exe`. A mano: `pip install -r requirements.txt pyinstaller` e `pyinstaller cadu_gui.spec`.
+
 ## Uso
 
 Richiede Python 3.8 o superiore; numpy (`pip install numpy`) è consigliato per un controllo Reed-Solomon veloce.

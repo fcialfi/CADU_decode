@@ -1,0 +1,2 @@
+# numpy: fast Reed-Solomon check of many CADUs (optional: without it the check is much slower).
+numpy

@@ -63,7 +63,10 @@ class CaduWindow:
         self.exclude_box = ttk.Checkbutton(bar, text="Exclude uncorrectable frames", variable=self.exclude_var,
                                            command=self._exclude_changed)
         self.exclude_box.pack(side=tk.LEFT)
-        ttk.Button(bar, text="Export CSV…", command=self.export_csv).pack(side=tk.RIGHT)
+        ttk.Button(bar, text="Exit", command=self.exit_app).pack(side=tk.RIGHT)
+        ttk.Button(bar, text="Export CSV…", command=self.export_csv).pack(side=tk.RIGHT, padx=(0, 8))
+        root.bind_all("<Control-q>", lambda _e: self.exit_app())
+        root.protocol("WM_DELETE_WINDOW", self.exit_app)
         self.file_var = tk.StringVar(value="No file: press Open… (CADUs starting with the sync marker 1ACFFC1D)")
         status = ttk.Frame(root, padding=(10, 0))
         status.pack(fill=tk.X)
@@ -162,6 +165,10 @@ class CaduWindow:
 
     # --- file ---
 
+    def exit_app(self) -> None:
+        """Close the program: the Exit button, Ctrl+Q and the window close button."""
+        self.root.destroy()
+
     def open_file(self) -> None:
         path = filedialog.askopenfilename(title="Open a file of CADUs",
                                           filetypes=[("All files", "*.*"), ("Binary", "*.bin *.dat *.raw")])
@@ -181,7 +188,10 @@ class CaduWindow:
             self.progress_label.pack(side=tk.RIGHT)
             self.progress.pack(side=tk.RIGHT, padx=(10, 4))
             self.root.update_idletasks()
-            self.progress.grab_set()  # no clicks elsewhere until the loading is over
+            try:
+                self.progress.grab_set()  # no clicks elsewhere until the loading is over
+            except tk.TclError:  # window not shown yet (file given on the command line)
+                pass
             self.root.config(cursor="watch")
         else:
             self.progress.grab_release()
