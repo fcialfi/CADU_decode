@@ -87,8 +87,8 @@ L'elenco frame per frame si aggiunge con `--frames` (o tutti i frame in CSV con 
   Only RS errors) sono tolte e disattivate; con i frame non correggibili esclusi, Only RS errors diventa Only RS-corrected frames (gli unici errori rimasti sono i frame corretti);
 - **Open…** carica il file; interleaving, randomizzazione (Auto / Yes / No) e FECF si cambiano in alto e il file
   viene riletto; accanto al nome del file è scritto se i codeblock sono stati letti come randomizzati;
-- scheda **Summary**: il riepilogo in forma grafica: riquadri con i numeri principali (CADU, FER, frame corretti,
-  frame senza errori, spacecraft), il grafico degli errori Reed-Solomon lungo il file (byte corretti per frame
+- scheda **Summary**: il riepilogo in forma grafica: riquadri con i numeri principali (CADU, frame senza errori, corretti, non correggibili, FER,
+  spacecraft), il grafico degli errori Reed-Solomon lungo il file (byte corretti per frame
   e frame non correggibili in rosso, con i bordi del 5 % in grigio; passando col mouse un tooltip dà il CADU, la barra e i frame non correggibili lì vicino; trascinando o con la rotella si fa lo zoom fino al singolo CADU, clic destro torna al file intero, doppio clic apre il CADU), le tabelle dei virtual channel, della CLCW
   più frequente e di quelle diverse, e dei frame non correggibili; doppio clic su una riga: apre il CADU;
 - scheda **Text report**: lo stesso riepilogo come testo, con **Copy to clipboard**;

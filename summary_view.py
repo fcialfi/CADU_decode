@@ -151,14 +151,16 @@ class SummaryView(Page):
         self._tile(tiles, "CADUs", f"{n:,}", f"{cadu_len} bytes each", TEXT)
         if checked:
             fer = len(bad) / n
-            self._tile(tiles, "Frame error rate", _fmt_rate(fer), f"{len(bad)} uncorrectable of {n}\n"
-                       f"{100 * fer:.3f} %", BAD if bad else GOOD)
+            self._tile(tiles, "Error-free frames", f"{100 * status['ok'] / n:.2f} %", f"{status['ok']:,} frames\n"
+                       "before any correction", TEXT)
             corrected = sum(r["rs_corrected"] for r in all_rows)
             self._tile(tiles, "Corrected frames", f"{status['corrected']:,}",
                        f"{corrected} bytes corrected\n{100 * status['corrected'] / n:.2f} % of the frames",
                        WARN if status["corrected"] else GOOD)
-            self._tile(tiles, "Error-free frames", f"{100 * status['ok'] / n:.2f} %", f"{status['ok']:,} frames\n"
-                       "before any correction", TEXT)
+            self._tile(tiles, "Uncorrectable frames", f"{len(bad):,}",
+                       f"beyond the Reed-Solomon code\n{100 * fer:.3f} % of the frames", BAD if bad else GOOD)
+            self._tile(tiles, "Frame error rate", _fmt_rate(fer), f"uncorrectable / CADUs\n"
+                       f"{len(bad)} / {n}", BAD if bad else GOOD)
         else:
             self._tile(tiles, "Reed-Solomon", "not checked", "enable the Reed-Solomon check", MUTED)
         mc_jumps, mc_missing = cd._counter_gaps([r["mc_count"] for r in rows]) if rows else (0, 0)
