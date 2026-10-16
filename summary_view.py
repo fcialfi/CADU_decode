@@ -26,8 +26,8 @@ def _fmt_rate(x: float) -> str:
     return "0" if x == 0 else f"{x:.2e}"
 
 
-class SummaryView(ttk.Frame):
-    """Scrollable page with the summary; ``update`` fills it, ``on_goto(number)`` opens a CADU."""
+class Page(ttk.Frame):
+    """Scrollable page with the building blocks of the views: sections, cards, tiles, tables."""
 
     def __init__(self, parent, on_goto=None):
         super().__init__(parent)
@@ -41,10 +41,9 @@ class SummaryView(ttk.Frame):
         self._window = self.canvas.create_window(0, 0, window=self.page, anchor="nw")
         self.page.bind("<Configure>", lambda _e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._window, width=e.width))
-        self.canvas.bind("<Enter>", lambda _e: self.canvas.bind_all("<MouseWheel>", self._wheel))
-        self.canvas.bind("<Leave>", lambda _e: self.canvas.unbind_all("<MouseWheel>"))
-        for seq, step in (("<Button-4>", -3), ("<Button-5>", 3)):
-            self.canvas.bind_all(seq, lambda _e, s=step: self.canvas.yview_scroll(s, "units"), add="+")
+        # The mouse wheel scrolls the page under the pointer.
+        self.canvas.bind("<Enter>", lambda _e: self._bind_wheel())
+        self.canvas.bind("<Leave>", lambda _e: self._unbind_wheel())
 
         base = tkfont.nametofont("TkDefaultFont")
         family = base.actual("family")
@@ -52,8 +51,17 @@ class SummaryView(ttk.Frame):
         self.f_value = tkfont.Font(family=family, size=18, weight="bold")
         self.f_label = tkfont.Font(family=family, size=9)
         self.f_small = tkfont.Font(family=family, size=9)
-        self.chart_data = None
-        self._message("Open a file of CADUs to see its summary.")
+        self.f_mono = tkfont.nametofont("TkFixedFont").copy()
+        self.f_mono.configure(size=10)
+
+    def _bind_wheel(self):
+        self.canvas.bind_all("<MouseWheel>", self._wheel)
+        self.canvas.bind_all("<Button-4>", lambda _e: self.canvas.yview_scroll(-3, "units"))
+        self.canvas.bind_all("<Button-5>", lambda _e: self.canvas.yview_scroll(3, "units"))
+
+    def _unbind_wheel(self):
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.canvas.unbind_all(seq)
 
     def _wheel(self, event):
         self.canvas.yview_scroll(int(-event.delta / 120) or (-1 if event.delta > 0 else 1), "units")
@@ -115,7 +123,15 @@ class SummaryView(ttk.Frame):
             tree.bind("<Double-1>", _open)
         return tree
 
-    # --- content ---
+
+
+class SummaryView(Page):
+    """The summary of a file; ``update_view`` fills it, ``on_goto(number)`` opens a CADU."""
+
+    def __init__(self, parent, on_goto=None):
+        super().__init__(parent, on_goto)
+        self.chart_data = None
+        self._message("Open a file of CADUs to see its summary.")
 
     def update_view(self, rows, all_rows, data_len, cadu_len):
         """Fill the page: ``rows`` analysed, ``all_rows`` every CADU of the file."""

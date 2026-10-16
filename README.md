@@ -91,10 +91,12 @@ L'elenco frame per frame si aggiunge con `--frames` (o tutti i frame in CSV con 
   e frame non correggibili in rosso, con i bordi del 5 % in grigio), le tabelle dei virtual channel, della CLCW
   più frequente e di quelle diverse, e dei frame non correggibili; doppio clic su una riga: apre il CADU;
 - scheda **Text report**: lo stesso riepilogo come testo, con **Copy to clipboard**;
-- scheda **Frames**: la tabella dei frame, con filtro per virtual channel, i frame idle nascondibili e
-  **Only RS errors** (frame corretti o non correggibili), **Only unusual CLCW** (solo i frame con CLCW diversa
-  dalla più frequente) e **Go to CADU #**; selezionando una riga, sotto compare il contenuto del CADU come con `--show`
-  (con o senza **Hex dump**);
+- scheda **Frames**: la tabella dei frame, con filtro per virtual channel, frame idle nascondibili,
+  **Only RS errors**, **Only unusual CLCW** e **Go to #**. Selezionando una riga, sotto compare il CADU in forma
+  grafica: stato Reed-Solomon, struttura (sync marker, header, data field, OCF, simboli RS con i byte), campi del
+  primary header e della CLCW a caselle (bit, binario, valore; in arancione i campi della CLCW diversi dalla più
+  frequente), le 5 parole Reed-Solomon, i pacchetti del data field e il dump esadecimale colorato per sezione con
+  i byte corretti evidenziati (**Hex dump** per mostrarlo o no; **Copy as text** copia la versione testuale);
 - **Export CSV…** salva tutti i frame.
 
 ## Uso

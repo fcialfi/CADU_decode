@@ -13,6 +13,7 @@ import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 import cadu_decode as cd
+from detail_view import DetailView
 from summary_view import SummaryView
 
 COLUMNS = (  # (key, heading, width)
@@ -101,7 +102,7 @@ class CaduWindow:
         panes = ttk.PanedWindow(frames_tab, orient=tk.VERTICAL)
         panes.pack(fill=tk.BOTH, expand=True)
         table_box = ttk.Frame(panes)
-        self.tree = ttk.Treeview(table_box, columns=[c[0] for c in COLUMNS], show="headings", height=12)
+        self.tree = ttk.Treeview(table_box, columns=[c[0] for c in COLUMNS], show="headings", height=9)
         for key, heading, width in COLUMNS:
             self.tree.heading(key, text=heading)
             self.tree.column(key, width=width, anchor="e" if key not in ("fhp", "flags") else "w", stretch=False)
@@ -111,8 +112,15 @@ class CaduWindow:
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self.show_selected())
         panes.add(table_box, weight=1)
-        self.detail_text = self._text(panes)
-        panes.add(self.detail_text.master, weight=2)
+        self.detail_view = DetailView(panes)
+        panes.add(self.detail_view, weight=3)
+        # The frame table gets about 10 rows; the rest goes to the detail of the selected frame.
+        def _place_sash(_event):
+            if panes.winfo_height() > 400 and not getattr(panes, "_placed", False):
+                panes.sashpos(0, 240)
+                panes._placed = True
+
+        panes.bind("<Configure>", _place_sash)
 
         # The summary as text, to read or copy.
         report = ttk.Frame(self.tabs)
@@ -207,7 +215,7 @@ class CaduWindow:
         if self.vc_var.get() not in self.vc_box.cget("values"):
             self.vc_var.set(ALL)
         self.fill_frames()
-        self._set_text(self.detail_text, ["Select a frame to see its content."])
+        self.detail_view._message("Select a frame to see its content.")
 
     # --- frames ---
 
@@ -278,10 +286,9 @@ class CaduWindow:
         if not selection:
             return
         number = int(selection[0])
-        lines = cd.show_cadu(number, self.rows[number - 1], self.data, int(self.interleave_var.get()),
-                             self.randomized, self.fecf_var.get(), dump=self.dump_var.get(),
-                             reed_solomon=self.rs_var.get())
-        self._set_text(self.detail_text, lines)
+        self.detail_view.show(number, self.rows[number - 1], self.data, int(self.interleave_var.get()),
+                              self.randomized, self.fecf_var.get(), reed_solomon=self.rs_var.get(),
+                              dump=self.dump_var.get(), usual=self.usual)
 
     def export_csv(self) -> None:
         if not self.rows:
