@@ -133,8 +133,9 @@ class SummaryView(Page):
         self.chart_data = None
         self._message("Open a file of CADUs to see its summary.")
 
-    def update_view(self, rows, all_rows, data_len, cadu_len):
-        """Fill the page: ``rows`` analysed, ``all_rows`` every CADU of the file."""
+    def update_view(self, rows, all_rows, data_len, cadu_len, packets=None):
+        """Fill the page: ``rows`` analysed, ``all_rows`` every CADU of the file, ``packets`` the packet
+        statistics (cadu_decode.packet_statistics)."""
         if not all_rows:
             self._message("No sync marker 1ACFFC1D found.")
             return
@@ -195,26 +196,19 @@ class SummaryView(Page):
             tk.Label(self.page, text="Chart: drag or mouse wheel to zoom, right click for the whole file, double "
                      "click to open the CADU.", bg=BG, fg=MUTED, font=self.f_small).pack(anchor="w", padx=16)
 
-        # Virtual channels.
+        # Virtual channels, from the good frames (the header of an uncorrectable frame is unreliable).
         self._section("Virtual channels", "idle: FHP 7FE; packet start: a packet header in the frame; "
-                      "no header: FHP 7FF")
-        table = []
-        for vc in sorted({r["vcid"] for r in rows}):
-            frames = [r for r in rows if r["vcid"] == vc]
-            jumps, missing = cd._counter_gaps([r["vc_count"] for r in frames])
-            fhp = Counter(r["first_header_pointer"] for r in frames)
-            table.append((vc, f"{len(frames):,}", f"{100 * len(frames) / len(rows):.1f} %", fhp[0x7FE],
-                          len(frames) - fhp[0x7FE] - fhp[0x7FF], fhp[0x7FF], frames[0]["vc_count"],
-                          frames[-1]["vc_count"], jumps, missing,
-                          sum(1 for r in frames if r.get("rs") == "corrected") if checked else "–",
-                          sum(1 for r in frames if r.get("rs") == "uncorrectable") if checked else "–"))
-        self._table((("VC", 50), ("Frames", 80), ("Share", 70), ("Idle", 60), ("Packet start", 95),
-                     ("No header", 80), ("VCFC first", 80), ("VCFC last", 80), ("Jumps", 60), ("Missing", 70),
-                     ("RS corrected", 95), ("Uncorrectable", 100)), table)
-        tk.Label(self.page, text=f"Master channel counter: {rows[0]['mc_count'] if rows else '–'} → "
-                 f"{rows[-1]['mc_count'] if rows else '–'}, {mc_jumps} jumps, about {mc_missing} frames missing "
-                 "(8-bit counters: gaps modulo 256)", bg=BG, fg=MUTED, font=self.f_small).pack(
-            anchor="w", padx=16, pady=(4, 0))
+                      "no header: FHP 7FF" + ("; uncorrectable frames not counted" if len(good) < len(rows) else ""))
+        if good:
+            table = [(row[0], f"{row[1]:,}", *row[2:]) for row in cd.virtual_channel_table(good)[1:]]
+            self._table((("VC", 50), ("Frames", 80), ("Share", 70), ("Idle", 60), ("Packet start", 95),
+                         ("No header", 80), ("VCFC first", 80), ("VCFC last", 80), ("Jumps", 60),
+                         ("Missing", 70), ("RS corrected", 95)), table)
+            tk.Label(self.page, text=f"Master channel counter: {good[0]['mc_count']} → {good[-1]['mc_count']}, "
+                     f"{mc_jumps} jumps, about {mc_missing} frames missing (8-bit counters: gaps modulo 256)",
+                     bg=BG, fg=MUTED, font=self.f_small).pack(anchor="w", padx=16, pady=(4, 0))
+        if packets is not None:
+            self._packets(packets)
 
         # CLCW.
         with_ocf = [r for r in rows if r["ocf_flag"]]
@@ -256,6 +250,48 @@ class SummaryView(Page):
                         [(r["n"], r["offset"], f"{100 * (r['n'] - 1) / max(n - 1, 1):.1f} %", r["vcid"],
                           r["rs_failed"]) for r in bad], goto_column=0)
         tk.Frame(self.page, bg=BG, height=16).pack()
+
+    def _packets(self, stats):
+        """Packets per VC and per APID, and the sequence count gaps with no frame lost."""
+        self._section("Packets per virtual channel", "rebuilt from the frames; idle packets: APID 2047")
+        table = []
+        for vc in sorted(stats["vcs"]):
+            v = stats["vcs"][vc]
+            share = v["idle_packet_bytes"] / v["packet_bytes"] if v["packet_bytes"] else 0
+            table.append((vc, f"{v['packets']:,}", f"{v['packet_bytes']:,}", f"{v['idle_packet_bytes']:,}",
+                          f"{100 * share:.1f} %", v["cut"], v["resyncs"]))
+        self._table((("VC", 50), ("Packets", 90), ("Packet bytes", 110), ("Idle packet bytes", 130),
+                     ("Idle share", 80), ("Cut at lost frames", 130), ("Resyncs", 70)), table)
+        tk.Label(self.page, text="Cut: packets lost where frames of the VC are missing (VC counter jump, "
+                 "uncorrectable frame).  Resyncs: packet stream broken with no frame missing.", bg=BG, fg=MUTED,
+                 font=self.f_small).pack(anchor="w", padx=16, pady=(4, 0))
+
+        self._section("Packets per APID", "sequence count gaps: with no frame lost in between, and at lost frames")
+        table = []
+        for a in stats["apids"]:
+            idle = a["apid"] == cd.IDLE_APID
+            length = str(a["min_length"]) if a["min_length"] == a["max_length"] else \
+                f"{a['min_length']}–{a['max_length']}"
+            table.append((f"{a['apid']}" + (" (idle)" if idle else ""), a["vc"], f"{a['packets']:,}",
+                          f"{a['bytes']:,}", length, a["first_seq"], a["last_seq"],
+                          "–" if idle else a["missing"], "–" if idle else a["missing_lost_frames"],
+                          "–" if idle else a["repeated"]))
+        tree = self._table((("APID", 90), ("VC", 50), ("Packets", 90), ("Bytes", 110), ("Length", 80),
+                            ("Seq first", 80), ("Seq last", 80), ("Missing (no frame lost)", 170),
+                            ("Missing at lost frames", 160), ("Repeated", 80)), table)
+        for item, a in zip(tree.get_children(), stats["apids"]):
+            if a["apid"] != cd.IDLE_APID and a["missing"]:
+                tree.item(item, tags=("gap",))
+        tree.tag_configure("gap", foreground=WARN)
+
+        if stats["gaps"]:
+            self._section(f"Sequence count gaps with no frame lost ({len(stats['gaps'])})",
+                          "packets that never reached this VC; double click: open the CADU after the gap")
+            self._table((("APID", 60), ("VC", 50), ("Count before", 100), ("Count after", 100), ("Missing", 70),
+                         ("CADU before", 100), ("CADU after", 100), ("Missing counts found in", 180)),
+                        [(g["apid"], g["vc"], g["before"], g["after"], g["missing"], g["frame_before"], g["frame"],
+                          ", ".join(f"VC {v}" for v in g["found_in"]) or "–") for g in stats["gaps"]],
+                        goto_column=6, anchors={7: "w"})
 
     # --- chart of the errors along the file ---
 

@@ -9,17 +9,21 @@ pseudo-randomizer). With interleaving depth I = 5 a CADU is 4 + 255·5 =
 
 For each CADU the script finds the sync marker, de-randomizes the codeblock
 and reads the primary header and, when the frame has one, the Operational
-Control Field (CLCW); the data field is skipped. It prints a summary of the
+Control Field (CLCW). It prints a summary of the
 file: number of CADUs, spacecraft, virtual channels (frames, idle frames,
 counter gaps), master channel counter and CLCW. The Reed-Solomon code is
 decoded: frames corrected, frames uncorrectable and the frame error rate;
-the fields of a corrected frame are read after the correction.
+the fields of a corrected frame are read after the correction. The Space
+Packets are rebuilt from the data fields of each virtual channel: packets
+and bytes per VC and APID, idle packets, and the gaps of the packet
+sequence counters.
 
     python cadu_decode.py capture.bin                        # summary
     python cadu_decode.py capture.bin --frames               # and the first 50 frames
     python cadu_decode.py capture.bin -o frames.csv          # every frame to a CSV file
     python cadu_decode.py capture.bin --show 125             # content of CADU number 125
     python cadu_decode.py capture.bin --exclude-bad          # without the uncorrectable frames
+    python cadu_decode.py capture.bin --export-packets out    # packets of each APID to out/
     python cadu_decode.py capture.bin --interleave 4 --fecf  # other frame layout
     python cadu_decode.py capture.bin --randomization no     # codeblocks already de-randomized
                                                              # (default: detected)
@@ -341,8 +345,271 @@ def reed_solomon_lines(rows, max_listed: int = 50, list_bad: bool = True) -> lis
     return lines
 
 
-def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50, all_rows=None) -> list[str]:
-    """Summary of a file of CADUs: counts, Reed-Solomon, spacecraft, virtual channels, frame counters, CLCW.
+def virtual_channel_table(good) -> list[tuple]:
+    """Rows (headings first) of the virtual channel table of the frames ``good`` (without the uncorrectable ones)."""
+    table = [("VC", "frames", "share", "idle", "packet start", "no header", "VCFC first", "VCFC last", "jumps",
+              "missing", "RS corrected")]
+    for vc in sorted({r["vcid"] for r in good}):
+        frames = [r for r in good if r["vcid"] == vc]
+        vc_jumps, vc_missing = _counter_gaps([r["vc_count"] for r in frames])
+        fhp = Counter(r["first_header_pointer"] for r in frames)
+        table.append((vc, len(frames), f"{100 * len(frames) / len(good):.1f} %", fhp[0x7FE],
+                      len(frames) - fhp[0x7FE] - fhp[0x7FF], fhp[0x7FF], frames[0]["vc_count"],
+                      frames[-1]["vc_count"], vc_jumps, vc_missing,
+                      sum(1 for r in frames if r.get("rs") == "corrected") if "rs" in frames[0] else "–"))
+    return table
+
+
+IDLE_APID = 0x7FF  # idle packets (CCSDS 133.0-B)
+SEQ_MOD = 1 << 14  # packet sequence count: 14 bits
+
+
+def frame_data_fields(data: bytes, rows, interleave: int = 5, randomized: bool = True, fecf: bool = False):
+    """Yield (row, data field) of every frame but the uncorrectable ones, corrected by the Reed-Solomon code."""
+    frame_len, codeblock_len = RS_K * interleave, RS_N * interleave
+    prn = pseudo_random_sequence(codeblock_len) if randomized else None
+    for r in rows:
+        if r.get("rs") == "uncorrectable":
+            continue
+        base = r["offset"] + len(ASM)
+        if r.get("rs") == "corrected":
+            block = data[base:base + codeblock_len]
+            block = _xor(block, prn) if prn is not None else block
+            frame = rs_ccsds.codeblock_status(block, interleave)[0][:frame_len]
+        else:
+            frame = data[base:base + frame_len]
+            frame = _xor(frame, prn) if prn is not None else frame
+        start = 6 + ((frame[6] & 0x3F) + 1 if r["sec_header_flag"] else 0)
+        end = frame_len - (2 if fecf else 0) - (4 if r["ocf_flag"] else 0)
+        yield r, frame[start:end]
+
+
+def iter_packets(data: bytes, rows, interleave: int = 5, randomized: bool = True, fecf: bool = False,
+                 keep_data: bool = False, vc_stats=None, progress=None):
+    """Space Packets rebuilt from the frames, virtual channel by virtual channel, in order of arrival.
+
+    Yields (vc, apid, seq_flags, seq_count, length, sec_header_flag, frame, chain, packet), with ``frame``
+    the number of the CADU where the packet starts, ``packet`` its bytes (with ``keep_data``, otherwise
+    None) and ``chain`` a number that changes whenever the packet stream of the VC breaks: a frame of the
+    VC lost (VC frame counter jump, e.g. an uncorrectable frame) or a packet that does not end where the
+    next First Header Pointer says. The packets of one chain follow each other without anything lost.
+    ``vc_stats`` (a dict) receives per VC: frames, idle_frames, packets, packet_bytes, idle_packet_bytes,
+    cut (packets lost at a break), resyncs (breaks of the stream inside a VC with no frame lost),
+    skipped_bytes (bytes before the first packet header after a break).
+    """
+    stats = {} if vc_stats is None else vc_stats
+    state = {}
+    chains = iter(range(1 << 62))
+    total = len(rows)
+    for k, (r, field) in enumerate(frame_data_fields(data, rows, interleave, randomized, fecf)):
+        if progress is not None and k % 2000 == 0:
+            progress(r["n"], total)
+        vc = r["vcid"]
+        st = stats.setdefault(vc, Counter())
+        s = state.get(vc)
+        if s is None:
+            s = state[vc] = {"buf": bytearray(), "synced": False, "count": None, "chain": next(chains),
+                             "base": 0, "marks": []}
+        st["frames"] += 1
+        if s["count"] is not None and r["vc_count"] != (s["count"] + 1) % 256:
+            if s["synced"] and s["buf"]:
+                st["cut"] += 1
+            s["buf"].clear()
+            s["synced"] = False
+        s["count"] = r["vc_count"]
+        fhp = r["first_header_pointer"]
+        if fhp == 0x7FE:  # idle data only
+            st["idle_frames"] += 1
+            continue
+        buf = s["buf"]
+        if not s["synced"]:
+            if fhp == 0x7FF or fhp >= len(field):
+                st["skipped_bytes"] += len(field)
+                continue
+            st["skipped_bytes"] += fhp
+            buf[:] = field[fhp:]
+            s["synced"], s["chain"] = True, next(chains)
+            s["base"], s["marks"] = 0, [(0, r["n"])]
+        else:
+            if fhp == 0x7FF:
+                s["marks"].append((s["base"] + len(buf), r["n"]))
+                buf += field
+            else:
+                s["marks"].append((s["base"] + len(buf), r["n"]))
+                buf += field[:fhp]
+                yield from _extract(vc, s, st, keep_data)
+                if buf or not s["synced"]:  # the packet does not end where the First Header Pointer says
+                    st["resyncs"] += 1
+                    s["chain"] = next(chains)
+                buf[:] = field[fhp:]
+                s["synced"], s["base"], s["marks"] = True, 0, [(0, r["n"])]
+        yield from _extract(vc, s, st, keep_data)
+        if not s["synced"]:  # a header that cannot be one: wait for the next First Header Pointer
+            st["resyncs"] += 1
+            s["chain"] = next(chains)
+
+
+def _extract(vc, s, st, keep_data):
+    """The complete packets at the head of the buffer of a virtual channel."""
+    buf, marks = s["buf"], s["marks"]
+    while s["synced"] and len(buf) >= 6:
+        if buf[0] >> 5:  # packet version not 0: not a packet header, lost in the stream
+            buf.clear()
+            s["synced"] = False
+            return
+        length = int.from_bytes(buf[4:6], "big") + 7
+        if len(buf) < length:
+            return
+        word = int.from_bytes(buf[0:2], "big")
+        seq = int.from_bytes(buf[2:4], "big")
+        while len(marks) > 1 and marks[1][0] <= s["base"]:
+            marks.pop(0)
+        apid = word & 0x7FF
+        st["packets"] += 1
+        st["packet_bytes"] += length
+        if apid == IDLE_APID:
+            st["idle_packet_bytes"] += length
+        yield (vc, apid, seq >> 14, seq & 0x3FFF, length, (word >> 11) & 1, marks[0][1], s["chain"],
+               bytes(buf[:length]) if keep_data else None)
+        del buf[:length]
+        s["base"] += length
+
+
+def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool = True, fecf: bool = False,
+                      max_gaps: int = 2000, progress=None) -> dict:
+    """Packets of the file per virtual channel and per APID, with the gaps of the sequence counters.
+
+    Returns {"vcs": per VC counts (see iter_packets), "apids": one dict per (APID, VC), "gaps": the gaps
+    of a sequence counter inside a chain (nothing lost in the frames: the packets missing never reached
+    this VC; for each, the VCs where the missing counts were found), at most ``max_gaps``}.
+    """
+    from array import array
+
+    vcs = {}
+    apids = {}
+    gaps = []
+    seqs = {}
+    for vc, apid, flags, seq, length, sec, frame, chain, _ in iter_packets(
+            data, rows, interleave, randomized, fecf, vc_stats=vcs, progress=progress):
+        a = apids.get((apid, vc))
+        if a is None:
+            a = apids[(apid, vc)] = {"apid": apid, "vc": vc, "packets": 0, "bytes": 0, "min_length": length,
+                                     "max_length": length, "first_seq": seq, "last_seq": seq, "gaps": 0,
+                                     "missing": 0, "gaps_lost_frames": 0, "missing_lost_frames": 0,
+                                     "repeated": 0, "sec_header": sec, "_chain": chain, "_frame": frame}
+            seqs[(apid, vc)] = array("H")
+        else:
+            step = (seq - a["last_seq"]) % SEQ_MOD
+            if apid != IDLE_APID and step != 1:
+                if step == 0:
+                    a["repeated"] += 1
+                elif chain == a["_chain"]:
+                    a["gaps"] += 1
+                    a["missing"] += step - 1
+                    if len(gaps) < max_gaps:
+                        gaps.append({"apid": apid, "vc": vc, "before": a["last_seq"], "after": seq,
+                                     "missing": step - 1, "frame_before": a["_frame"], "frame": frame})
+                else:
+                    a["gaps_lost_frames"] += 1
+                    a["missing_lost_frames"] += step - 1
+        a["packets"] += 1
+        a["bytes"] += length
+        a["min_length"] = min(a["min_length"], length)
+        a["max_length"] = max(a["max_length"], length)
+        a["last_seq"], a["_chain"], a["_frame"] = seq, chain, frame
+        seqs[(apid, vc)].append(seq)
+    # Where the packets missing from a VC are: in another VC with the same APID?
+    elsewhere = {}
+    for g in gaps:
+        if g["missing"] > 1000:
+            g["found_in"] = []
+            continue
+        others = [vc for (apid, vc) in seqs if apid == g["apid"] and vc != g["vc"]]
+        found = []
+        for vc in others:
+            key = (g["apid"], vc)
+            if key not in elsewhere:
+                elsewhere[key] = set(seqs[key])
+            if any((g["before"] + i) % SEQ_MOD in elsewhere[key] for i in range(1, g["missing"] + 1)):
+                found.append(vc)
+        g["found_in"] = found
+    table = sorted(apids.values(), key=lambda a: (a["apid"], a["vc"]))
+    for a in table:
+        del a["_chain"], a["_frame"]
+    return {"vcs": vcs, "apids": table, "gaps": gaps}
+
+
+def packet_lines(stats: dict, max_listed: int = 50) -> list[str]:
+    """Text of the packet statistics (see packet_statistics)."""
+    lines = ["Packets (rebuilt from the frames; uncorrectable frames left out):"]
+    table = [("VC", "frames", "idle frames", "packets", "packet bytes", "idle packets", "cut", "resyncs")]
+    for vc in sorted(stats["vcs"]):
+        v = stats["vcs"][vc]
+        share = v["idle_packet_bytes"] / v["packet_bytes"] if v["packet_bytes"] else 0
+        table.append((vc, v["frames"], v["idle_frames"], v["packets"], v["packet_bytes"],
+                      f"{v['idle_packet_bytes']} B ({100 * share:.1f} %)", v["cut"], v["resyncs"]))
+    lines += ["  " + line for line in _table(table)]
+    lines.append("  idle packets: APID 2047; cut: packets lost where frames of the VC are missing; "
+                 "resyncs: packet stream broken with no frame missing")
+    lines.append("")
+    table = [("APID", "VC", "packets", "bytes", "length", "seq first", "seq last", "gaps", "missing",
+              "at lost frames", "repeated")]
+    for a in stats["apids"]:
+        length = str(a["min_length"]) if a["min_length"] == a["max_length"] else \
+            f"{a['min_length']}-{a['max_length']}"
+        idle = a["apid"] == IDLE_APID
+        table.append((f"{a['apid']}" + (" idle" if idle else ""), a["vc"], a["packets"], a["bytes"], length,
+                      a["first_seq"], a["last_seq"], "–" if idle else a["gaps"], "–" if idle else a["missing"],
+                      "–" if idle else f"{a['gaps_lost_frames']} ({a['missing_lost_frames']} missing)",
+                      "–" if idle else a["repeated"]))
+    lines += ["  " + line for line in _table(table)]
+    lines.append("  gaps / missing: sequence count jumps with no frame lost in between (packets that never "
+                 "reached this VC); at lost frames: jumps where frames of the VC are missing")
+    if stats["gaps"]:
+        lines.append("")
+        lines.append(f"  Sequence count gaps with no frame lost ({len(stats['gaps'])}"
+                     + (", first ones" if len(stats["gaps"]) >= 2000 else "") + "):")
+        table = [("APID", "VC", "count before", "count after", "missing", "CADU before", "CADU after",
+                  "missing counts found in")]
+        for g in stats["gaps"][:max_listed]:
+            table.append((g["apid"], g["vc"], g["before"], g["after"], g["missing"], g["frame_before"], g["frame"],
+                          ", ".join(f"VC {v}" for v in g["found_in"]) or "–"))
+        lines += ["    " + line for line in _table(table, last_left=True)]
+        if len(stats["gaps"]) > max_listed:
+            lines.append(f"    ... {len(stats['gaps']) - max_listed} more")
+    return lines
+
+
+def export_packets(data: bytes, rows, folder: str, interleave: int = 5, randomized: bool = True,
+                   fecf: bool = False, include_idle: bool = False, progress=None) -> dict:
+    """Write the packets of each APID to <folder>/apid_<APID>.bin (in order of arrival) and the list of
+    every packet to <folder>/packets.csv. Returns {APID: packets written}."""
+    import os
+
+    os.makedirs(folder, exist_ok=True)
+    files, counts = {}, Counter()
+    try:
+        with open(os.path.join(folder, "packets.csv"), "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(("vc", "apid", "seq_flags", "seq_count", "length", "sec_header_flag", "cadu", "chain"))
+            for vc, apid, flags, seq, length, sec, frame, chain, packet in iter_packets(
+                    data, rows, interleave, randomized, fecf, keep_data=True, progress=progress):
+                if apid == IDLE_APID and not include_idle:
+                    continue
+                writer.writerow((vc, apid, flags, seq, length, sec, frame, chain))
+                if apid not in files:
+                    files[apid] = open(os.path.join(folder, f"apid_{apid:04d}.bin"), "wb")
+                files[apid].write(packet)
+                counts[apid] += 1
+    finally:
+        for f in files.values():
+            f.close()
+    return dict(counts)
+
+
+def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50, all_rows=None, packets=None) -> list[str]:
+    """Summary of a file of CADUs: counts, Reed-Solomon, spacecraft, virtual channels, frame counters, CLCW
+    and, with ``packets`` (from packet_statistics), the packets per VC and APID.
 
     ``rows`` are the frames analysed; ``all_rows`` every CADU of the file when some were excluded
     (uncorrectable frames).
@@ -363,23 +630,17 @@ def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50, all_rows=N
         lines.append(f"Warning: transfer frame versions {dict(versions)}: wrong interleaving or randomization, "
                      "or frames with errors.")
 
-    jumps, missing = _counter_gaps([r["mc_count"] for r in rows])
-    lines.append(f"Master channel counter: {rows[0]['mc_count']} → {rows[-1]['mc_count']}, {jumps} jumps, "
-                 f"about {missing} frames missing (8-bit counter: gaps modulo 256)")
+    if good:
+        jumps, missing = _counter_gaps([r["mc_count"] for r in good])
+        lines.append(f"Master channel counter: {good[0]['mc_count']} → {good[-1]['mc_count']}, {jumps} jumps, "
+                     f"about {missing} frames missing (8-bit counter: gaps modulo 256)")
 
-    lines.append("")
-    lines.append("Virtual channels:")
-    table = [("VC", "frames", "share", "idle", "packet start", "no header", "VCFC first", "VCFC last", "jumps",
-              "missing")]
-    for vc in sorted({r["vcid"] for r in rows}):
-        frames = [r for r in rows if r["vcid"] == vc]
-        vc_jumps, vc_missing = _counter_gaps([r["vc_count"] for r in frames])
-        fhp = Counter(r["first_header_pointer"] for r in frames)
-        table.append((vc, len(frames), f"{100 * len(frames) / n:.1f} %", fhp[0x7FE],
-                      len(frames) - fhp[0x7FE] - fhp[0x7FF], fhp[0x7FF], frames[0]["vc_count"],
-                      frames[-1]["vc_count"], vc_jumps, vc_missing))
-    lines += ["  " + line for line in _table(table)]
-    lines.append("  idle: FHP 7FE (idle data only); packet start: a packet header in the frame; no header: FHP 7FF")
+        lines.append("")
+        lines.append("Virtual channels" + (" (uncorrectable frames not counted: their header is unreliable):"
+                                           if len(good) < len(rows) else ":"))
+        lines += ["  " + line for line in _table(virtual_channel_table(good))]
+        lines.append("  idle: FHP 7FE (idle data only); packet start: a packet header in the frame; "
+                     "no header: FHP 7FF")
 
     with_ocf = [r for r in rows if r["ocf_flag"]]
     lines.append("")
@@ -413,6 +674,9 @@ def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50, all_rows=N
             lines += ["    " + line for line in _table(table, last_left=True)]
             if len(odd) > max_listed:
                 lines.append(f"    ... {len(odd) - max_listed} more (--frames and -o list every frame)")
+    if packets is not None:
+        lines.append("")
+        lines += packet_lines(packets, max_listed)
     return lines
 
 
@@ -619,6 +883,11 @@ def main(argv=None) -> int:
     ap.add_argument("--no-rs", action="store_true", help="do not check the Reed-Solomon code (faster)")
     ap.add_argument("--exclude-bad", action="store_true",
                     help="leave the frames the Reed-Solomon code cannot correct out of the analysis")
+    ap.add_argument("--no-packets", action="store_true",
+                    help="do not rebuild the packets (no packet and APID statistics; faster)")
+    ap.add_argument("--export-packets", metavar="FOLDER",
+                    help="write the packets of each APID to FOLDER/apid_NNNN.bin and their list to "
+                         "FOLDER/packets.csv (idle packets left out)")
     args = ap.parse_args(argv)
     if not 1 <= args.interleave <= 8:
         ap.error("the interleaving depth must be 1 to 8")
@@ -628,6 +897,8 @@ def main(argv=None) -> int:
         ap.error("--exclude-bad needs the Reed-Solomon check: drop --no-rs")
     if args.no_dump and not args.show:
         ap.error("--no-dump applies to --show only")
+    if args.export_packets and args.no_packets:
+        ap.error("--export-packets contradicts --no-packets")
 
     data = read_input(args.file)
     if args.not_randomized or args.randomization == "no":
@@ -658,7 +929,8 @@ def main(argv=None) -> int:
                                       args.fecf, dump=not args.no_dump, reed_solomon=not args.no_rs)))
         return 0
     analysed = [r for r in rows if r.get("rs") != "uncorrectable"] if args.exclude_bad else rows
-    print("\n".join(summary(analysed, len(data), cadu_len, all_rows=rows)))
+    packets = None if args.no_packets else packet_statistics(data, rows, args.interleave, randomized, args.fecf)
+    print("\n".join(summary(analysed, len(data), cadu_len, all_rows=rows, packets=packets)))
 
     if args.frames is not None:
         shown = analysed if args.frames == 0 else analysed[:args.frames]
@@ -674,6 +946,10 @@ def main(argv=None) -> int:
             writer.writerows(analysed)
         print(f"\nFrames written to {args.output}" + (" (uncorrectable frames excluded)"
                                                        if len(analysed) < len(rows) else ""))
+    if args.export_packets:
+        counts = export_packets(data, rows, args.export_packets, args.interleave, randomized, args.fecf)
+        print(f"\nPackets written to {args.export_packets}: " + (", ".join(
+            f"APID {apid}: {n}" for apid, n in sorted(counts.items())) or "none") + "; list in packets.csv")
     return 0
 
 

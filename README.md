@@ -51,12 +51,13 @@ numpy funziona ma è molto più lento.
 
 Per un file con molti CADU lo script mostra di default un riepilogo:
 
-- numero di CADU, byte fuori dai CADU e quante volte la sincronizzazione si è persa e ritrovata;
-- SCID trovati;
+- numero di CADU;
+- SCID trovati (solo dai frame buoni);
 - master channel frame counter: primo e ultimo valore, salti e frame mancanti stimati (contatore a 8 bit:
   i salti sono contati modulo 256);
 - per ogni **virtual channel**: numero di frame e quota, frame idle (FHP 7FE), frame con inizio di
-  pacchetto, frame senza header (FHP 7FF), primo e ultimo VCFC, salti e frame mancanti;
+  pacchetto, frame senza header (FHP 7FF), primo e ultimo VCFC, salti e frame mancanti, frame corretti dal
+  Reed-Solomon. I frame non correggibili non sono contati: il loro header (VC compreso) non è affidabile;
 - **CLCW**: valori di VC, COP in effect, status e report value, e in quanti frame sono attivi i flag
   No RF available, No bit lock, Lockout, Wait, Retransmit.
 - la **CLCW più frequente** e l'elenco dei CADU con una CLCW diversa (numero, offset, VC, MCFC e campi che
@@ -64,6 +65,26 @@ Per un file con molti CADU lo script mostra di default un riepilogo:
   Reed-Solomon non è verificato. Il riepilogo ne elenca 50; `--frames` e `-o` danno tutti i frame.
 
 L'elenco frame per frame si aggiunge con `--frames` (o tutti i frame in CSV con `-o`).
+
+### Pacchetti
+
+I **Space Packet** sono ricostruiti dai campi dati di ogni virtual channel, in ordine di arrivo: un pacchetto
+che continua nel frame successivo dello stesso VC viene ricomposto, e il First Header Pointer di ogni frame
+controlla che il pacchetto precedente finisca proprio lì. I frame non correggibili sono lasciati fuori; dove
+mancano frame di un VC (salto del contatore VCFC) il pacchetto a cavallo è perso (*cut*) e la catena riparte
+dal primo header successivo. Il riepilogo dà:
+
+- per **VC**: pacchetti, byte, byte di **idle packet** (APID 2047) e la loro quota, pacchetti persi a cavallo
+  dei frame mancanti, risincronizzazioni (pacchetto che non finisce dove dice l'FHP, senza frame mancanti);
+- per **APID e VC**: pacchetti, byte, lunghezza, primo e ultimo sequence count e i **salti del sequence
+  count**, separati in *senza frame persi* (pacchetti che non sono mai arrivati in questo VC: scartati a bordo
+  o mandati su un altro VC) e *ai frame persi* (spiegati dai frame mancanti);
+- l'elenco dei salti senza frame persi: APID, VC, contatori prima e dopo, CADU prima e dopo e i VC dove si
+  trovano i contatori mancanti (stesso APID su un altro VC).
+
+`--export-packets cartella` scrive i pacchetti di ogni APID in `cartella/apid_NNNN.bin` (uno dopo l'altro, in
+ordine di arrivo) e l'elenco di tutti in `packets.csv`; gli idle packet sono lasciati fuori. `--no-packets`
+salta la ricostruzione.
 
 ## Contenuto di un CADU
 
@@ -89,7 +110,7 @@ L'elenco frame per frame si aggiunge con `--frames` (o tutti i frame in CSV con 
   viene riletto; accanto al nome del file è scritto se i codeblock sono stati letti come randomizzati;
 - scheda **Summary**: il riepilogo in forma grafica: riquadri con i numeri principali (CADU, frame senza errori, corretti, non correggibili, FER,
   spacecraft), il grafico degli errori Reed-Solomon lungo il file (byte corretti per frame
-  e frame non correggibili in rosso, con i bordi del 5 % in grigio; passando col mouse un tooltip dà il CADU, la barra e i frame non correggibili lì vicino; trascinando o con la rotella si fa lo zoom fino al singolo CADU, clic destro torna al file intero, doppio clic apre il CADU), le tabelle dei virtual channel, della CLCW
+  e frame non correggibili in rosso, con i bordi del 5 % in grigio; passando col mouse un tooltip dà il CADU, la barra e i frame non correggibili lì vicino; trascinando o con la rotella si fa lo zoom fino al singolo CADU, clic destro torna al file intero, doppio clic apre il CADU), le tabelle dei virtual channel, dei pacchetti per VC e per APID (in arancione gli APID con salti del sequence count), dei salti senza frame persi, della CLCW
   più frequente e di quelle diverse, e dei frame non correggibili; doppio clic su una riga: apre il CADU;
 - scheda **Text report**: lo stesso riepilogo come testo, con **Copy to clipboard**;
 - scheda **Frames**: la tabella dei frame, con filtro per virtual channel e caselle che,
@@ -98,7 +119,8 @@ L'elenco frame per frame si aggiunge con `--frames` (o tutti i frame in CSV con 
   primary header e della CLCW a caselle (bit, binario, valore; in arancione i campi della CLCW diversi dalla più
   frequente), le 5 parole Reed-Solomon, i pacchetti del data field e il dump esadecimale colorato per sezione con
   i byte corretti evidenziati (**Hex dump** per mostrarlo o no; **Copy as text** copia la versione testuale);
-- **Export CSV…** salva tutti i frame.
+- **Export** → *Frames to CSV…* salva tutti i frame; *Packets, one file per APID…* scrive i pacchetti di ogni
+  APID in una cartella (come `--export-packets`).
 
 ## Eseguibile per Windows
 

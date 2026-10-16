@@ -34,6 +34,7 @@ class CaduWindow:
         self.cadu_len = 0
         self.randomized = True
         self.usual = None
+        self.packets = None
         root.title("CADU Decoder")
         root.geometry("1250x820")
         self.mono = tkfont.nametofont("TkFixedFont").copy()
@@ -64,7 +65,12 @@ class CaduWindow:
                                            command=self._exclude_changed)
         self.exclude_box.pack(side=tk.LEFT)
         ttk.Button(bar, text="Exit", command=self.exit_app).pack(side=tk.RIGHT)
-        ttk.Button(bar, text="Export CSV…", command=self.export_csv).pack(side=tk.RIGHT, padx=(0, 8))
+        export = ttk.Menubutton(bar, text="Export")
+        menu = tk.Menu(export, tearoff=False)
+        menu.add_command(label="Frames to CSV…", command=self.export_csv)
+        menu.add_command(label="Packets, one file per APID…", command=self.export_packets)
+        export["menu"] = menu
+        export.pack(side=tk.RIGHT, padx=(0, 8))
         root.bind_all("<Control-q>", lambda _e: self.exit_app())
         root.protocol("WM_DELETE_WINDOW", self.exit_app)
         self.file_var = tk.StringVar(value="No file: press Open… (CADUs starting with the sync marker 1ACFFC1D)")
@@ -176,9 +182,11 @@ class CaduWindow:
             self.load(path)
 
     # Overall share of the progress bar taken by each stage of the loading.
-    STAGES = {"read": (0, 5), "frames": (5, 35), "reed-solomon": (35, 85), "display": (85, 100)}
+    STAGES = {"read": (0, 5), "frames": (5, 30), "reed-solomon": (30, 70), "packets": (70, 85),
+              "display": (85, 100)}
     STAGE_TEXT = {"read": "reading the file", "frames": "reading the frames",
-                  "reed-solomon": "Reed-Solomon check", "display": "filling the views"}
+                  "reed-solomon": "Reed-Solomon check", "packets": "rebuilding the packets",
+                  "display": "filling the views"}
 
     def _busy(self, on: bool) -> None:
         """Show the progress bar (and block the other controls) while loading."""
@@ -269,10 +277,14 @@ class CaduWindow:
         self.rows = cd.decode_all(self.data, interleave, self.randomized, self.fecf_var.get(),
                                   reed_solomon=self.rs_var.get(), progress=self._step)
         self.cadu_len = len(cd.ASM) + cd.RS_N * interleave
+        self._step("packets")
+        self.packets = cd.packet_statistics(self.data, self.rows, interleave, self.randomized, self.fecf_var.get(),
+                                            progress=lambda done, total: self._step("packets", done, total))
         self._step("display")
         self.refresh(progress=True)
-        self.file_var.set(f"{name}: {len(self.data)} bytes; CADU {self.cadu_len} bytes, "
-                          f"transfer frame {cd.RS_K * interleave} bytes (I = {interleave}); codeblocks {how}")
+        self._file_line = (f"{name}: {len(self.data)} bytes; CADU {self.cadu_len} bytes, "
+                           f"transfer frame {cd.RS_K * interleave} bytes (I = {interleave}); codeblocks {how}")
+        self.file_var.set(self._file_line)
 
     def _analysed(self):
         if self.exclude_var.get():
@@ -283,10 +295,10 @@ class CaduWindow:
         """Summary and frame table of the frames analysed (without the uncorrectable ones when excluded)."""
         if self.rows:
             self._set_text(self.summary_text, cd.summary(self._analysed(), len(self.data), self.cadu_len,
-                                                         all_rows=self.rows))
+                                                         all_rows=self.rows, packets=self.packets))
         else:
             self._set_text(self.summary_text, ["No sync marker 1ACFFC1D found."])
-        self.summary_view.update_view(self._analysed(), self.rows, len(self.data), self.cadu_len)
+        self.summary_view.update_view(self._analysed(), self.rows, len(self.data), self.cadu_len, self.packets)
         self.usual = cd.usual_clcw(self._analysed())
         vcs = sorted({r["vcid"] for r in self._analysed()})  # without the excluded frames
         self.vc_box.configure(values=[ALL] + [str(v) for v in vcs])
@@ -371,6 +383,33 @@ class CaduWindow:
         self.detail_view.show(number, self.rows[number - 1], self.data, int(self.interleave_var.get()),
                               self.randomized, self.fecf_var.get(), reed_solomon=self.rs_var.get(),
                               dump=self.dump_var.get(), usual=self.usual)
+
+    def export_packets(self) -> None:
+        """Packets of each APID to <folder>/apid_NNNN.bin, and their list to packets.csv."""
+        if not self.rows:
+            messagebox.showinfo("Export packets", "Open a file of CADUs first.")
+            return
+        folder = filedialog.askdirectory(title="Folder for the packets (one .bin file per APID)",
+                                         mustexist=False)
+        if not folder:
+            return
+        self._busy(True)
+        error = None
+        try:
+            counts = cd.export_packets(self.data, self.rows, folder, int(self.interleave_var.get()), self.randomized,
+                                       self.fecf_var.get(),
+                                       progress=lambda done, total: self._step("packets", done, total))
+        except OSError as exc:
+            error = exc
+        finally:
+            self._busy(False)
+            self.file_var.set(self._file_line)
+        if error:
+            messagebox.showerror("Export packets", f"Cannot write to {folder}: {error}")
+            return
+        listed = "\n".join(f"APID {apid}: {n} packets → apid_{apid:04d}.bin" for apid, n in sorted(counts.items()))
+        messagebox.showinfo("Export packets", f"Written to {folder}:\n\n{listed or 'no packets'}\n\n"
+                            "packets.csv lists every packet (idle packets, APID 2047, left out).")
 
     def export_csv(self) -> None:
         if not self.rows:

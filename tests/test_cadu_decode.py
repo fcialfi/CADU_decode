@@ -56,11 +56,12 @@ def test_summary_of_virtual_channels(tmp_path, capsys):
     text = capsys.readouterr().out
     assert "CADUs: 5 of 1279 bytes" in text
     assert "Master channel counter: 0 → 8, 1 jumps, about 4 frames missing" in text
-    vc_lines = {line.split()[0]: line.split() for line in text.splitlines()
-                if line.startswith("  ") and line.split()[0] in ("1", "7")}
-    # VC, frames, share, %, idle, packet start, no header, first, last, jumps, missing
-    assert vc_lines["1"][1:2] + vc_lines["1"][4:] == ["3", "0", "2", "1", "0", "3", "1", "1"]
-    assert vc_lines["7"][1:2] + vc_lines["7"][4:] == ["2", "2", "0", "0", "0", "1", "0", "0"]
+    section = text.split("Virtual channels:")[1].split("idle: FHP")[0]
+    vc_lines = {line.split()[0]: line.split() for line in section.splitlines()
+                if line.startswith("  ") and line.split() and line.split()[0] in ("1", "7")}
+    # VC, frames, share, %, idle, packet start, no header, first, last, jumps, missing, RS corrected
+    assert vc_lines["1"][1:2] + vc_lines["1"][4:] == ["3", "0", "2", "1", "0", "3", "1", "1", "0"]
+    assert vc_lines["7"][1:2] + vc_lines["7"][4:] == ["2", "2", "0", "0", "0", "1", "0", "0", "0"]
     rows = [dict(offset=o, **f) for o, f in cd.decode(path.read_bytes())]
     assert cd._counter_gaps([255, 0, 2]) == (1, 1)  # wrap at 256
     assert len(cd.frame_lines(rows)) == 6
@@ -179,3 +180,76 @@ def test_errors_along_the_file():
     assert lines[2].split()[:3] == ["0-10", "%", "1-4"] and lines[2].split()[-1] == "2"  # first part: 2 FAIL
     assert lines[-2].split()[-1] == "1"  # last part: 1 FAIL
     assert "First and last 5 % (2 + 2 CADUs): 3 uncorrectable; in between: 0/36 = 0.000e+00" in lines[-1]
+
+
+def _packet(apid, seq, size):
+    """A Space Packet of ``size`` bytes (header included), data bytes = APID & 0xFF."""
+    return ((0x0800 | apid).to_bytes(2, "big") + (0xC000 | seq).to_bytes(2, "big")
+            + (size - 7).to_bytes(2, "big") + bytes([apid & 0xFF]) * (size - 6))
+
+
+def _frames_from_stream(stream, vcid, mc_start, vc_start, interleave=5):
+    """CADUs carrying the packet ``stream`` (list of packets) on one VC, with the First Header Pointers."""
+    field_len = 223 * interleave - 6 - 4
+    data, starts, pos = b"".join(stream), [], 0
+    for p in stream:
+        starts.append(pos)
+        pos += len(p)
+    cadus = []
+    for k in range(0, (len(data) + field_len - 1) // field_len):
+        lo, hi = k * field_len, (k + 1) * field_len
+        inside = [x - lo for x in starts if lo <= x < hi]
+        fhp = inside[0] if inside else 0x7FF
+        field = data[lo:hi].ljust(field_len, b"\0")
+        header = (bytes([0x0E, 0xE0 | (vcid << 1) | 1]) + bytes([(mc_start + k) % 256, (vc_start + k) % 256])
+                  + (0x1800 | fhp).to_bytes(2, "big"))
+        frame = header + field + bytes.fromhex("01040000")
+        codeblock = rs_ccsds.encode_codeblock(frame, interleave)
+        cadus.append(cd.ASM + bytes(a ^ b for a, b in zip(codeblock, cd.pseudo_random_sequence(len(codeblock)))))
+    return cadus
+
+
+def test_packets_rebuilt(tmp_path, capsys):
+    # VC 1: APID 51 (123 bytes) and APID 35 (77 bytes) interleaved, APID 35 count 13405 skipped (sent on VC 0),
+    # then an idle packet filling the last frame. VC 0: the APID 35 packet 13405.
+    stream, seq51, seq35 = [], 3090, 13404
+    for k in range(40):
+        stream.append(_packet(51, seq51, 123))
+        seq51 += 1
+        if k % 2 == 0:
+            if seq35 == 13405:
+                seq35 += 1  # goes to VC 0
+            stream.append(_packet(35, seq35, 77))
+            seq35 += 1
+    used = sum(len(p) for p in stream)
+    stream.append(_packet(cd.IDLE_APID, 0, 1105 - used % 1105))
+    vc1 = _frames_from_stream(stream, 1, 0, 0)
+    vc0 = _frames_from_stream([_packet(35, 13405, 77), _packet(cd.IDLE_APID, 0, 1105 - 77)], 0, len(vc1), 0)
+    data = b"".join(vc1 + vc0)
+    rows = cd.decode_all(data)
+    stats = cd.packet_statistics(data, rows)
+    by = {(a["apid"], a["vc"]): a for a in stats["apids"]}
+    assert by[(51, 1)]["packets"] == 40 and by[(51, 1)]["gaps"] == 0
+    assert by[(35, 1)]["packets"] == 20 and by[(35, 1)]["gaps"] == 1 and by[(35, 1)]["missing"] == 1
+    assert by[(35, 0)]["first_seq"] == 13405
+    (gap,) = stats["gaps"]
+    assert (gap["apid"], gap["vc"], gap["before"], gap["after"], gap["found_in"]) == (35, 1, 13404, 13406, [0])
+    assert stats["vcs"][1]["idle_packet_bytes"] == 1105 - used % 1105
+    assert stats["vcs"][1]["cut"] == 0 and stats["vcs"][1]["resyncs"] == 0
+
+    # A frame of VC 1 lost: the packets running through it are cut, the gap is put down to the lost frame.
+    lost = b"".join(vc1[:3] + vc1[4:] + vc0)
+    stats = cd.packet_statistics(lost, cd.decode_all(lost))
+    by = {(a["apid"], a["vc"]): a for a in stats["apids"]}
+    assert stats["vcs"][1]["cut"] == 1
+    assert by[(51, 1)]["gaps"] == 0 and by[(51, 1)]["gaps_lost_frames"] == 1
+
+    path = tmp_path / "cadu.bin"
+    path.write_bytes(data)
+    out = tmp_path / "packets"
+    assert cd.main([str(path), "--export-packets", str(out)]) == 0
+    text = capsys.readouterr().out
+    assert "Packets (rebuilt from the frames" in text and "missing counts found in" in text
+    assert (out / "apid_0051.bin").read_bytes() == b"".join(p for p in stream if p[1] == 51)
+    assert len((out / "packets.csv").read_text().splitlines()) == 1 + 40 + 21
+    assert not (out / "apid_2047.bin").exists()
