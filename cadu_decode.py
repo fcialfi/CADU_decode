@@ -620,6 +620,12 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     if not 1 <= args.interleave <= 8:
         ap.error("the interleaving depth must be 1 to 8")
+    if args.not_randomized and args.randomization == "yes":
+        ap.error("--not-randomized contradicts --randomization yes")
+    if args.exclude_bad and args.no_rs:
+        ap.error("--exclude-bad needs the Reed-Solomon check: drop --no-rs")
+    if args.no_dump and not args.show:
+        ap.error("--no-dump applies to --show only")
 
     data = read_input(args.file)
     if args.not_randomized or args.randomization == "no":

@@ -57,9 +57,12 @@ class CaduWindow:
         self.rs_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(bar, text="Reed-Solomon check", variable=self.rs_var,
                         command=self.reload).pack(side=tk.LEFT, padx=(12, 0))
+        # Analysis options (no new decoding): they need the Reed-Solomon check.
+        ttk.Separator(bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=12)
         self.exclude_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bar, text="Exclude uncorrectable frames", variable=self.exclude_var,
-                        command=self.refresh).pack(side=tk.LEFT, padx=(8, 0))
+        self.exclude_box = ttk.Checkbutton(bar, text="Exclude uncorrectable frames", variable=self.exclude_var,
+                                           command=self.refresh)
+        self.exclude_box.pack(side=tk.LEFT)
         ttk.Button(bar, text="Export CSV…", command=self.export_csv).pack(side=tk.RIGHT)
         self.file_var = tk.StringVar(value="No file: press Open… (CADUs starting with the sync marker 1ACFFC1D)")
         status = ttk.Frame(root, padding=(10, 0))
@@ -83,12 +86,14 @@ class CaduWindow:
         self.vc_box = ttk.Combobox(filters, textvariable=self.vc_var, values=[ALL], width=8, state="readonly")
         self.vc_box.pack(side=tk.LEFT, padx=(4, 12))
         self.vc_box.bind("<<ComboboxSelected>>", lambda _e: self.fill_frames())
-        self.idle_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(filters, text="Idle frames", variable=self.idle_var,
+        # Every filter hides frames: ticked, fewer frames are listed.
+        self.hide_idle_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(filters, text="Hide idle frames", variable=self.hide_idle_var,
                         command=self.fill_frames).pack(side=tk.LEFT)
         self.rserr_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(filters, text="Only RS errors", variable=self.rserr_var,
-                        command=self.fill_frames).pack(side=tk.LEFT, padx=(12, 0))
+        self.rserr_box = ttk.Checkbutton(filters, text="Only RS errors", variable=self.rserr_var,
+                                         command=self.fill_frames)
+        self.rserr_box.pack(side=tk.LEFT, padx=(12, 0))
         self.odd_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(filters, text="Only unusual CLCW", variable=self.odd_var,
                         command=self.fill_frames).pack(side=tk.LEFT, padx=(12, 0))
@@ -213,6 +218,7 @@ class CaduWindow:
         self.reload(busy=True)
 
     def reload(self, busy: bool = False) -> None:
+        self._sync_checks()
         if not self.path:
             return
         if not busy:
@@ -221,6 +227,15 @@ class CaduWindow:
             self._load()
         finally:
             self._busy(False)
+
+    def _sync_checks(self) -> None:
+        """The options that need the Reed-Solomon check are unticked and greyed out without it."""
+        state = ["!disabled"] if self.rs_var.get() else ["disabled"]
+        if not self.rs_var.get():
+            self.exclude_var.set(False)
+            self.rserr_var.set(False)
+        self.exclude_box.state(state)
+        self.rserr_box.state(state)
 
     def _load(self) -> None:
         interleave = int(self.interleave_var.get())
@@ -270,7 +285,7 @@ class CaduWindow:
                 continue
             if self.rserr_var.get() and r.get("rs", "ok") == "ok":
                 continue
-            if not self.idle_var.get() and r["first_header_pointer"] == 0x7FE:
+            if self.hide_idle_var.get() and r["first_header_pointer"] == 0x7FE:
                 continue
             if self.odd_var.get() and not cd.clcw_differences(r, self.usual):
                 continue
@@ -308,7 +323,7 @@ class CaduWindow:
             return
         if not self.tree.exists(str(number)):  # hidden by the filters
             self.vc_var.set(ALL)
-            self.idle_var.set(True)
+            self.hide_idle_var.set(False)
             self.odd_var.set(False)
             self.rserr_var.set(False)
             if self.exclude_var.get() and self.rows[number - 1].get("rs") == "uncorrectable":

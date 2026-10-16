@@ -83,7 +83,8 @@ L'elenco frame per frame si aggiunge con `--frames` (o tutti i frame in CSV con 
 `python cadu_gui.py [file]` apre una finestra (Tkinter, incluso in Python):
 
 - **Reed-Solomon check** e **Exclude uncorrectable frames** in alto; la colonna RS dice ok, corr. n (byte
-  corretti) o FAIL;
+  corretti) o FAIL; senza il controllo Reed-Solomon le caselle che ne dipendono (Exclude uncorrectable frames,
+  Only RS errors) sono tolte e disattivate;
 - **Open…** carica il file; interleaving, randomizzazione (Auto / Yes / No) e FECF si cambiano in alto e il file
   viene riletto; accanto al nome del file è scritto se i codeblock sono stati letti come randomizzati;
 - scheda **Summary**: il riepilogo in forma grafica: riquadri con i numeri principali (CADU, FER, frame corretti,
@@ -91,8 +92,8 @@ L'elenco frame per frame si aggiunge con `--frames` (o tutti i frame in CSV con 
   e frame non correggibili in rosso, con i bordi del 5 % in grigio; passando col mouse un tooltip dà il CADU, la barra e i frame non correggibili lì vicino; trascinando o con la rotella si fa lo zoom fino al singolo CADU, clic destro torna al file intero, doppio clic apre il CADU), le tabelle dei virtual channel, della CLCW
   più frequente e di quelle diverse, e dei frame non correggibili; doppio clic su una riga: apre il CADU;
 - scheda **Text report**: lo stesso riepilogo come testo, con **Copy to clipboard**;
-- scheda **Frames**: la tabella dei frame, con filtro per virtual channel, frame idle nascondibili,
-  **Only RS errors**, **Only unusual CLCW** e **Go to #**. Selezionando una riga, sotto compare il CADU in forma
+- scheda **Frames**: la tabella dei frame, con filtro per virtual channel e caselle che,
+  spuntate, mostrano meno frame: **Hide idle frames**, **Only RS errors**, **Only unusual CLCW**; **Go to #**. Selezionando una riga, sotto compare il CADU in forma
   grafica: stato Reed-Solomon, struttura (sync marker, header, data field, OCF, simboli RS con i byte), campi del
   primary header e della CLCW a caselle (bit, binario, valore; in arancione i campi della CLCW diversi dalla più
   frequente), le 5 parole Reed-Solomon, i pacchetti del data field e il dump esadecimale colorato per sezione con
