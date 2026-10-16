@@ -178,13 +178,13 @@ class SummaryView(Page):
             edges_bad = sum(1 for r in all_rows[:cut] + all_rows[n - cut:] if r["rs"] == "uncorrectable")
             core_bad = sum(1 for r in core if r["rs"] == "uncorrectable")
             self._section("Reed-Solomon errors along the file",
-                          "position in the file = time in the pass; shaded: first and last 5 %")
+                          "position in the file = time in the pass; shaded: first and last 5 %.  Drag or mouse "
+                          "wheel: zoom; right click: whole file; double click: open the CADU")
             card = self._card()
             card.pack(fill=tk.X, padx=16)
             self.chart = tk.Canvas(card, height=240, bg=CARD, highlightthickness=0)
             self.chart.pack(fill=tk.X, padx=4, pady=4)
-            self.chart_data = all_rows
-            self.chart.bind("<Configure>", lambda _e: self._draw_chart())
+            self._set_chart(all_rows)
             text = (f"First and last 5 % ({cut} + {cut} CADUs): {edges_bad} uncorrectable.   "
                     f"In between: {core_bad} of {len(core)}, frame error rate {_fmt_rate(core_bad / len(core))}."
                     if core else "")
@@ -252,53 +252,203 @@ class SummaryView(Page):
                           r["rs_failed"]) for r in bad], goto_column=0)
         tk.Frame(self.page, bg=BG, height=16).pack()
 
+    # --- chart of the errors along the file ---
+
+    # Plot area inside the chart canvas.
+    MARGINS = (60, 40, 30, 40)  # left, right, top, bottom
+
+    def _set_chart(self, rows):
+        """Data of the chart, with running sums so that any part of the file is summed at once."""
+        self.chart_data = rows
+        self.chart_view = (0, len(rows))
+        corr, failed, fixed = [0], [0], [0]
+        for r in rows:
+            corr.append(corr[-1] + r["rs_corrected"])
+            failed.append(failed[-1] + (r["rs"] == "uncorrectable"))
+            fixed.append(fixed[-1] + (r["rs"] == "corrected"))
+        self._sum_corr, self._sum_failed, self._sum_fixed = corr, failed, fixed
+        self._bad_index = [k for k, r in enumerate(rows) if r["rs"] == "uncorrectable"]
+        self._drag = None
+        c = self.chart
+        c.bind("<Configure>", lambda _e: self._draw_chart())
+        c.bind("<Motion>", self._chart_motion)
+        c.bind("<Leave>", lambda _e: c.delete("tip"))
+        c.bind("<ButtonPress-1>", self._chart_press)
+        c.bind("<B1-Motion>", self._chart_drag)
+        c.bind("<ButtonRelease-1>", self._chart_release)
+        c.bind("<Double-Button-1>", self._chart_open)
+        c.bind("<Button-3>", lambda _e: self._zoom(0, len(rows)))
+        c.bind("<MouseWheel>", lambda e: self._chart_wheel(e, e.delta > 0))
+        c.bind("<Button-4>", lambda e: self._chart_wheel(e, True))
+        c.bind("<Button-5>", lambda e: self._chart_wheel(e, False))
+
+    def _plot_box(self):
+        left, right, top, bottom = self.MARGINS
+        return left, top, self.chart.winfo_width() - left - right, self.chart.winfo_height() - top - bottom
+
+    def _index_at(self, x: float) -> int:
+        """Index (in the rows) of the CADU under the abscissa ``x``."""
+        left, _top, pw, _ph = self._plot_box()
+        lo, hi = self.chart_view
+        k = lo + int((x - left) / pw * (hi - lo))
+        return min(max(k, lo), hi - 1)
+
+    def _x_of(self, index: float) -> float:
+        left, _top, pw, _ph = self._plot_box()
+        lo, hi = self.chart_view
+        return left + (index - lo) / (hi - lo) * pw
+
+    def _bins(self):
+        """(start, end) index of each bar of the view: bars about 5 pixels wide, one per CADU when zoomed in."""
+        lo, hi = self.chart_view
+        m = hi - lo
+        bins = min(m, max(80, self._plot_box()[2] // 5))
+        return [(lo + k * m // bins, lo + (k + 1) * m // bins) for k in range(bins)]
+
+    def _zoom(self, lo: int, hi: int) -> None:
+        n = len(self.chart_data)
+        lo, hi = max(0, lo), min(n, hi)
+        if hi - lo < 10:  # at least 10 CADUs on screen
+            mid = (lo + hi) // 2
+            lo, hi = max(0, mid - 5), min(n, max(0, mid - 5) + 10)
+        self.chart_view = (lo, hi)
+        self._draw_chart()
+
+    def _chart_wheel(self, event, zoom_in: bool):
+        """Mouse wheel on the chart: zoom in or out around the pointer."""
+        lo, hi = self.chart_view
+        k = self._index_at(event.x)
+        factor = 0.5 if zoom_in else 2.0
+        share = (k - lo) / max(hi - lo, 1)
+        width = max(10, int((hi - lo) * factor))
+        start = int(k - share * width)
+        n = len(self.chart_data)
+        start = min(max(0, start), max(0, n - width))
+        self._zoom(start, start + width)
+        self._chart_motion(event)
+        return "break"  # do not scroll the page
+
+    def _chart_press(self, event):
+        left, top, pw, ph = self._plot_box()
+        if left <= event.x <= left + pw:
+            self._drag = event.x
+
+    def _chart_drag(self, event):
+        if self._drag is None:
+            return
+        left, top, pw, ph = self._plot_box()
+        x = min(max(event.x, left), left + pw)
+        c = self.chart
+        c.delete("select", "tip")
+        c.create_rectangle(min(x, self._drag), top, max(x, self._drag), top + ph, fill=ACCENT,
+                           stipple="gray25", outline=ACCENT, tags="select")
+
+    def _chart_release(self, event):
+        start, self._drag = self._drag, None
+        self.chart.delete("select")
+        if start is None or abs(event.x - start) < 4:
+            return
+        a, b = sorted((start, event.x))
+        self._zoom(self._index_at(a), self._index_at(b) + 1)
+
+    def _chart_open(self, event):
+        """Double click: open the uncorrectable frame under the pointer, otherwise the CADU there."""
+        if not self.on_goto:
+            return
+        near = self._bad_near(event.x)
+        k = near[0] if near else self._index_at(event.x)
+        self.on_goto(self.chart_data[k]["n"])
+
+    def _bad_near(self, x: float, pixels: float = 3) -> list[int]:
+        """Indexes of the uncorrectable frames drawn within ``pixels`` of ``x``."""
+        from bisect import bisect_left, bisect_right
+        lo, hi = self.chart_view
+        a, b = self._index_at(x - pixels), self._index_at(x + pixels)
+        found = self._bad_index[bisect_left(self._bad_index, max(a, lo)):bisect_right(self._bad_index, min(b, hi - 1))]
+        return sorted(found, key=lambda k: abs(self._x_of(k + 0.5) - x))
+
+    def _chart_motion(self, event):
+        """Tooltip: the CADU under the pointer, its bar and the uncorrectable frames nearby."""
+        c = self.chart
+        c.delete("tip")
+        if self._drag is not None or not self.chart_data:
+            return
+        left, top, pw, ph = self._plot_box()
+        if not (left <= event.x <= left + pw and top <= event.y <= top + ph):
+            return
+        rows, n = self.chart_data, len(self.chart_data)
+        k = self._index_at(event.x)
+        a, b = next((a, b) for a, b in self._bins() if a <= k < b)
+        lines = [f"CADU #{rows[k]['n']}  ({100 * k / max(n - 1, 1):.2f} % of the file)  RS {cd.rs_text(rows[k])}"]
+        if b - a > 1:
+            lines.append(f"Bar: CADUs #{rows[a]['n']}-#{rows[b - 1]['n']} ({b - a})")
+        corr = self._sum_corr[b] - self._sum_corr[a]
+        lines.append(f"  {corr / (b - a):.2f} bytes corrected per frame, {self._sum_fixed[b] - self._sum_fixed[a]} "
+                     f"corrected, {self._sum_failed[b] - self._sum_failed[a]} uncorrectable")
+        near = self._bad_near(event.x)
+        if near:
+            names = ", ".join(f"#{rows[j]['n']}" for j in sorted(near)[:6]) + (" …" if len(near) > 6 else "")
+            lines.append(f"Uncorrectable here: {len(near)} ({names}); double click opens #{rows[near[0]]['n']}")
+        c.create_line(event.x, top, event.x, top + ph, fill=MUTED, dash=(2, 2), tags="tip")
+        text = c.create_text(0, 0, text="\n".join(lines), anchor="nw", fill=TEXT, font=self.f_small, tags="tip")
+        x0, y0, x1, y1 = c.bbox(text)
+        tw, th = x1 - x0 + 12, y1 - y0 + 10
+        x = event.x + 14 if event.x + 14 + tw < c.winfo_width() else event.x - 14 - tw
+        y = min(max(event.y - th - 8, 2), c.winfo_height() - th - 2)
+        c.coords(text, x + 6, y + 5)
+        box = c.create_rectangle(x, y, x + tw, y + th, fill="#fffbe6", outline=BORDER, tags="tip")
+        c.tag_raise(text, box)
+
     def _draw_chart(self):
-        """Bars: bytes corrected per frame in each part of the file; red ticks: uncorrectable frames."""
+        """Bars: bytes corrected per frame in each part of the view; red ticks: uncorrectable frames."""
         c, rows = self.chart, self.chart_data
         c.delete("all")
-        w, h = c.winfo_width(), c.winfo_height()
-        if w < 50 or not rows:
+        if c.winfo_width() < 50 or not rows:
             return
-        left, right, top, bottom = 60, 40, 30, 40
-        pw, ph = w - left - right, h - top - bottom
+        left, top, pw, ph = self._plot_box()
         n = len(rows)
-        bins = max(1, min(80, n))
-        values, fails = [], []
-        for k in range(bins):
-            part = rows[k * n // bins:(k + 1) * n // bins]
-            values.append(sum(r["rs_corrected"] for r in part) / max(len(part), 1))
+        lo, hi = self.chart_view
+        bins = self._bins()
+        values = [(self._sum_corr[b] - self._sum_corr[a]) / max(b - a, 1) for a, b in bins]
         top_value = max(values) or 1.0
-        # Edges (first and last 5 %).
-        edge = max(1, int(n * 0.05)) / n * pw
-        c.create_rectangle(left, top, left + edge, top + ph, fill=EDGE, outline="")
-        c.create_rectangle(left + pw - edge, top, left + pw, top + ph, fill=EDGE, outline="")
+        # Edges (first and last 5 % of the file), where they are in view.
+        cut = max(1, int(n * 0.05))
+        for a, b in ((0, cut), (n - cut, n)):
+            a, b = max(a, lo), min(b, hi)
+            if a < b:
+                c.create_rectangle(self._x_of(a), top, self._x_of(b), top + ph, fill=EDGE, outline="")
         # Grid and y axis.
         for k in range(5):
             y = top + ph - k * ph / 4
             c.create_line(left, y, left + pw, y, fill="#e3e8ef")
-            c.create_text(left - 8, y, text=f"{top_value * k / 4:.1f}", anchor="e", fill=MUTED, font=self.f_small)
+            c.create_text(left - 8, y, text=f"{top_value * k / 4:.3g}", anchor="e", fill=MUTED, font=self.f_small)
         # Bars.
-        bw = pw / bins
-        for k, v in enumerate(values):
+        for (a, b), v in zip(bins, values):
             if v > 0:
-                x0 = left + k * bw + bw * 0.15
-                c.create_rectangle(x0, top + ph - v / top_value * ph, x0 + bw * 0.7, top + ph, fill=ACCENT,
-                                   outline="")
+                x0, x1 = self._x_of(a), self._x_of(b)
+                pad = (x1 - x0) * 0.15
+                c.create_rectangle(x0 + pad, top + ph - v / top_value * ph, max(x1 - pad, x0 + pad + 1), top + ph,
+                                   fill=ACCENT, outline="")
         # Uncorrectable frames.
-        for r in rows:
-            if r["rs"] == "uncorrectable":
-                x = left + (r["n"] - 0.5) / n * pw
-                c.create_line(x, top, x, top + ph, fill=BAD, width=1.5)
+        from bisect import bisect_left
+        for k in self._bad_index[bisect_left(self._bad_index, lo):bisect_left(self._bad_index, hi)]:
+            x = self._x_of(k + 0.5)
+            c.create_line(x, top, x, top + ph, fill=BAD, width=1.5)
         # X axis.
         c.create_line(left, top + ph, left + pw, top + ph, fill=MUTED)
         for k in range(5):
             x = left + k * pw / 4
-            number = 1 + round(k * (n - 1) / 4)
-            c.create_text(x, top + ph + 12, text=f"{25 * k} %", fill=MUTED, font=self.f_small)
-            c.create_text(x, top + ph + 26, text=f"#{number}", fill=MUTED, font=self.f_small)
-        # Legend.
+            index = min(lo + round(k * (hi - lo - 1) / 4), n - 1)
+            c.create_text(x, top + ph + 12, text=f"{100 * index / max(n - 1, 1):.4g} %", fill=MUTED,
+                          font=self.f_small)
+            c.create_text(x, top + ph + 26, text=f"#{rows[index]['n']}", fill=MUTED, font=self.f_small)
+        # Legend and zoom state.
         lx = left + pw - 330
         c.create_rectangle(lx, 6, lx + 12, 18, fill=ACCENT, outline="")
         c.create_text(lx + 18, 12, text="bytes corrected per frame", anchor="w", fill=TEXT, font=self.f_small)
         c.create_line(lx + 190, 6, lx + 190, 18, fill=BAD, width=2)
         c.create_text(lx + 198, 12, text="uncorrectable frame", anchor="w", fill=TEXT, font=self.f_small)
+        per_bar = (hi - lo) / len(bins)
+        state = (f"CADUs #{rows[lo]['n']}-#{rows[hi - 1]['n']} of {n}; " if (lo, hi) != (0, n) else "Whole file; ") + \
+            ("one bar per CADU" if per_bar == 1 else f"one bar per {per_bar:.0f} CADUs")
+        c.create_text(left, 12, text=state, anchor="w", fill=MUTED, font=self.f_small)
