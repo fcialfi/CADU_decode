@@ -283,7 +283,7 @@ class SummaryView(Page):
         if self.on_check:
             entry.bind("<Return>", lambda _e: self.on_check())
             ttk.Button(bar, text="Apply", command=self.on_check).pack(side=tk.LEFT)
-        tk.Label(bar, text="e.g. 100 (science data) or 15-16, 100", bg=BG, fg=MUTED,
+        tk.Label(bar, text="default 0, 100 (time reporting, science data); e.g. 15-16, 100", bg=BG, fg=MUTED,
                  font=self.f_small).pack(side=tk.LEFT, padx=8)
         table, tags = [], []
         for a in stats["apids"]:

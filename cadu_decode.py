@@ -544,7 +544,7 @@ def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool =
     return {"vcs": vcs, "apids": table, "gaps": gaps}
 
 
-DEFAULT_CHECKED_APIDS = "100"  # science data (Payload Main Application)
+DEFAULT_CHECKED_APIDS = "0, 100"  # time reporting and science data (Payload Main Application)
 
 
 def parse_apids(text: str) -> set:
@@ -562,7 +562,7 @@ def parse_apids(text: str) -> set:
 def packet_lines(stats: dict, max_listed: int = 50, checked=None) -> list[str]:
     """Text of the packet statistics (see packet_statistics).
 
-    The continuity of the sequence counts is given for the APIDs ``checked`` only (default: 100): the
+    The continuity of the sequence counts is given for the APIDs ``checked`` only (default: 0 and 100): the
     others may be filtered or sampled on board (only some of their reports recorded), so that their
     counters jump without anything being lost.
     """
@@ -933,7 +933,7 @@ def main(argv=None) -> int:
                     help="do not rebuild the packets (no packet and APID statistics; faster)")
     ap.add_argument("--check-apids", default=DEFAULT_CHECKED_APIDS, metavar="LIST",
                     help="APIDs whose sequence count continuity is checked, e.g. 100 or 15-16,100 (default "
-                         f"{DEFAULT_CHECKED_APIDS}: science data); the others may be filtered on board")
+                         f"{DEFAULT_CHECKED_APIDS}: time reporting and science data); the others may be filtered on board")
     ap.add_argument("--export-packets", metavar="FOLDER",
                     help="write the packets of each APID to FOLDER/apid_NNNN.bin and their list to "
                          "FOLDER/packets.csv (idle packets left out)")

@@ -249,7 +249,7 @@ def test_packets_rebuilt(tmp_path, capsys):
     out = tmp_path / "packets"
     assert cd.main([str(path), "--export-packets", str(out)]) == 0
     text = capsys.readouterr().out
-    assert "Packets (rebuilt from the frames" in text and "missing counts found in" not in text  # 100 only
+    assert "Packets (rebuilt from the frames" in text and "missing counts found in" not in text  # 0, 100 only
     assert cd.main([str(path), "--check-apids", "35, 51"]) == 0
     text = capsys.readouterr().out
     assert "missing counts found in" in text and "APIDs 35, 51;" in text

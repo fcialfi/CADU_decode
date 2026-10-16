@@ -81,7 +81,7 @@ dal primo header successivo. Il riepilogo dà:
   o mandati su un altro VC) e *ai frame persi* (spiegati dai frame mancanti); un contatore che **torna indietro** (salto
   di oltre metà dei 16384 valori) è contato come *back jump* e non come pacchetti mancanti: è un altro tratto
   di dati, per esempio il dump della memoria dopo il real-time, o un dump fatto a blocchi;
-- la **continuità** del contatore è verificata solo per gli APID scelti (default **100**, i dati scientifici;
+- la **continuità** del contatore è verificata solo per gli APID scelti (default **0 e 100**: time reporting e dati scientifici;
   `--check-apids 15-16,100`, nella finestra il campo *Check the continuity of APIDs*): per gli altri il
   satellite può registrare solo una parte dei report (filtrati o campionati a bordo) e i salti non sono perdite;
 - l'elenco dei salti senza frame persi degli APID verificati: APID, VC, contatori prima e dopo, CADU prima e dopo e i VC dove si
