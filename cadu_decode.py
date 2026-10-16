@@ -216,11 +216,22 @@ def decode_all(data: bytes, interleave: int = 5, randomized: bool = True, fecf: 
                reed_solomon: bool = True, progress=None) -> list[dict]:
     """Every CADU as a dict: number n (from 1), offset, frame fields and, with ``reed_solomon``, rs
     ("ok", "corrected" or "uncorrectable"), rs_corrected (symbols corrected) and rs_failed (codewords
-    not correctable). The fields of a corrected frame are read from the corrected bytes."""
-    rows = [dict(n=k, offset=o, **f) for k, (o, f) in enumerate(decode(data, interleave, randomized, fecf), start=1)]
+    not correctable). The fields of a corrected frame are read from the corrected bytes.
+
+    ``progress(stage, done, total)`` is called now and then: stage "frames" (bytes read of the
+    file), then "reed-solomon" (CADUs checked).
+    """
+    rows = []
+    for k, (o, f) in enumerate(decode(data, interleave, randomized, fecf), start=1):
+        rows.append(dict(n=k, offset=o, **f))
+        if progress is not None and k % 2000 == 0:
+            progress("frames", o, len(data))
+    if progress is not None:
+        progress("frames", len(data), len(data))
     if not reed_solomon:
         return rows
-    errors = check_reed_solomon(data, [r["offset"] for r in rows], interleave, randomized, progress)
+    errors = check_reed_solomon(data, [r["offset"] for r in rows], interleave, randomized,
+                                None if progress is None else lambda d, t: progress("reed-solomon", d, t))
     for r in rows:
         fixed, counts = errors.get(r["offset"], (None, [0]))
         failed = sum(1 for c in counts if c < 0)

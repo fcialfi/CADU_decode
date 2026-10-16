@@ -62,7 +62,12 @@ class CaduWindow:
                         command=self.refresh).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(bar, text="Export CSV…", command=self.export_csv).pack(side=tk.RIGHT)
         self.file_var = tk.StringVar(value="No file: press Open… (CADUs starting with the sync marker 1ACFFC1D)")
-        ttk.Label(root, textvariable=self.file_var, padding=(10, 0)).pack(fill=tk.X)
+        status = ttk.Frame(root, padding=(10, 0))
+        status.pack(fill=tk.X)
+        ttk.Label(status, textvariable=self.file_var).pack(side=tk.LEFT)
+        # Progress of the loading, shown only while a file is read and analysed.
+        self.progress = ttk.Progressbar(status, mode="determinate", maximum=100, length=320)
+        self.progress_label = ttk.Label(status, width=8, anchor="e")
 
         self.tabs = ttk.Notebook(root)
         self.tabs.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
@@ -158,50 +163,89 @@ class CaduWindow:
         if path:
             self.load(path)
 
+    # Overall share of the progress bar taken by each stage of the loading.
+    STAGES = {"read": (0, 5), "frames": (5, 35), "reed-solomon": (35, 85), "display": (85, 100)}
+    STAGE_TEXT = {"read": "reading the file", "frames": "reading the frames",
+                  "reed-solomon": "Reed-Solomon check", "display": "filling the views"}
+
+    def _busy(self, on: bool) -> None:
+        """Show the progress bar (and block the other controls) while loading."""
+        if on:
+            self.progress["value"] = 0
+            self.progress_label.configure(text="0 %")
+            self.progress_label.pack(side=tk.RIGHT)
+            self.progress.pack(side=tk.RIGHT, padx=(10, 4))
+            self.root.update_idletasks()
+            self.progress.grab_set()  # no clicks elsewhere until the loading is over
+            self.root.config(cursor="watch")
+        else:
+            self.progress.grab_release()
+            self.progress.pack_forget()
+            self.progress_label.pack_forget()
+            self.root.config(cursor="")
+        self.root.update()
+
+    def _step(self, stage: str, done: int = 0, total: int = 1) -> None:
+        """Move the progress bar to ``done`` of ``total`` within ``stage``."""
+        low, high = self.STAGES[stage]
+        value = low + (high - low) * min(done, total) / max(total, 1)
+        self.progress["value"] = value
+        self.progress_label.configure(text=f"{value:.0f} %")
+        name = os.path.basename(self.path) if self.path else ""
+        self.file_var.set(f"{name}: {self.STAGE_TEXT[stage]}…")
+        self.root.update()
+
     def load(self, path: str) -> None:
+        previous, self.path = self.path, path
+        self._busy(True)
         try:
-            self.data = cd.read_input(path)
+            self._step("read")
+            data = cd.read_input(path)
         except OSError as exc:
+            self.path = previous
+            self._busy(False)
             messagebox.showerror("Open", f"Cannot read {path}: {exc}")
             return
-        self.path = path
-        self.reload()
+        except BaseException:
+            self._busy(False)
+            raise
+        self.data = data
+        self.reload(busy=True)
 
-    def reload(self) -> None:
+    def reload(self, busy: bool = False) -> None:
         if not self.path:
             return
-        self.root.config(cursor="watch")
-        self.root.update_idletasks()
+        if not busy:
+            self._busy(True)
         try:
-            interleave = int(self.interleave_var.get())
-            choice = self.randomized_var.get()
-            if choice == "Auto":
-                self.randomized = cd.detect_randomization(self.data, interleave, self.fecf_var.get())
-                how = ("randomized" if self.randomized else "not randomized, already de-randomized") + " (detected)"
-            else:
-                self.randomized = choice == "Yes"
-                how = "randomized" if self.randomized else "not randomized"
-            name = os.path.basename(self.path)
-
-            def progress(done, total):
-                self.file_var.set(f"{name}: Reed-Solomon check, {done} of {total} CADUs...")
-                self.root.update_idletasks()
-
-            self.rows = cd.decode_all(self.data, interleave, self.randomized, self.fecf_var.get(),
-                                      reed_solomon=self.rs_var.get(), progress=progress)
+            self._load()
         finally:
-            self.root.config(cursor="")
+            self._busy(False)
+
+    def _load(self) -> None:
+        interleave = int(self.interleave_var.get())
+        choice = self.randomized_var.get()
+        if choice == "Auto":
+            self.randomized = cd.detect_randomization(self.data, interleave, self.fecf_var.get())
+            how = ("randomized" if self.randomized else "not randomized, already de-randomized") + " (detected)"
+        else:
+            self.randomized = choice == "Yes"
+            how = "randomized" if self.randomized else "not randomized"
+        name = os.path.basename(self.path)
+        self.rows = cd.decode_all(self.data, interleave, self.randomized, self.fecf_var.get(),
+                                  reed_solomon=self.rs_var.get(), progress=self._step)
         self.cadu_len = len(cd.ASM) + cd.RS_N * interleave
-        self.file_var.set(f"{os.path.basename(self.path)}: {len(self.data)} bytes; CADU {self.cadu_len} bytes, "
+        self._step("display")
+        self.refresh(progress=True)
+        self.file_var.set(f"{name}: {len(self.data)} bytes; CADU {self.cadu_len} bytes, "
                           f"transfer frame {cd.RS_K * interleave} bytes (I = {interleave}); codeblocks {how}")
-        self.refresh()
 
     def _analysed(self):
         if self.exclude_var.get():
             return [r for r in self.rows if r.get("rs") != "uncorrectable"]
         return self.rows
 
-    def refresh(self) -> None:
+    def refresh(self, progress: bool = False) -> None:
         """Summary and frame table of the frames analysed (without the uncorrectable ones when excluded)."""
         if self.rows:
             self._set_text(self.summary_text, cd.summary(self._analysed(), len(self.data), self.cadu_len,
@@ -214,7 +258,7 @@ class CaduWindow:
         self.vc_box.configure(values=[ALL] + [str(v) for v in vcs])
         if self.vc_var.get() not in self.vc_box.cget("values"):
             self.vc_var.set(ALL)
-        self.fill_frames()
+        self.fill_frames(progress)
         self.detail_view._message("Select a frame to see its content.")
 
     # --- frames ---
@@ -232,9 +276,10 @@ class CaduWindow:
                 continue
             yield r
 
-    def fill_frames(self) -> None:
+    def fill_frames(self, progress: bool = False) -> None:
         self.tree.delete(*self.tree.get_children())
         shown = 0
+        total = len(self._analysed())
         for r in self._visible_rows():
             if r["ocf_flag"]:
                 flags = ",".join(name for key, name in (
@@ -248,6 +293,8 @@ class CaduWindow:
                 cd.first_header_pointer_text(r["first_header_pointer"]), r["segment_length_id"], r["ocf_flag"],
                 *clcw, cd.rs_text(r)))
             shown += 1
+            if progress and shown % 2000 == 0:
+                self._step("display", shown, total)
         analysed = len(self._analysed())
         excluded = len(self.rows) - analysed
         self.count_var.set(f"{shown} of {analysed} frames" + (f" ({excluded} excluded)" if excluded else ""))
