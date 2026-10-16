@@ -13,6 +13,7 @@ import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 import cadu_decode as cd
+from summary_view import SummaryView
 
 COLUMNS = (  # (key, heading, width)
     ("n", "#", 70), ("offset", "Offset", 90), ("scid", "SCID", 55), ("vcid", "VC", 40), ("mc_count", "MCFC", 55),
@@ -64,8 +65,8 @@ class CaduWindow:
 
         self.tabs = ttk.Notebook(root)
         self.tabs.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
-        self.summary_text = self._text(self.tabs)
-        self.tabs.add(self.summary_text.master, text="Summary")
+        self.summary_view = SummaryView(self.tabs, on_goto=self.open_cadu)
+        self.tabs.add(self.summary_view, text="Summary")
 
         frames_tab = ttk.Frame(self.tabs)
         self.tabs.add(frames_tab, text="Frames")
@@ -112,6 +113,13 @@ class CaduWindow:
         panes.add(table_box, weight=1)
         self.detail_text = self._text(panes)
         panes.add(self.detail_text.master, weight=2)
+
+        # The summary as text, to read or copy.
+        report = ttk.Frame(self.tabs)
+        self.tabs.add(report, text="Text report")
+        ttk.Button(report, text="Copy to clipboard", command=self.copy_report).pack(anchor="w", pady=(4, 4))
+        self.summary_text = self._text(report)
+        self.summary_text.master.pack(fill=tk.BOTH, expand=True)
 
         if path:
             self.load(path)
@@ -192,6 +200,7 @@ class CaduWindow:
                                                          all_rows=self.rows))
         else:
             self._set_text(self.summary_text, ["No sync marker 1ACFFC1D found."])
+        self.summary_view.update_view(self._analysed(), self.rows, len(self.data), self.cadu_len)
         self.usual = cd.usual_clcw(self._analysed())
         vcs = sorted({r["vcid"] for r in self._analysed()})  # without the excluded frames
         self.vc_box.configure(values=[ALL] + [str(v) for v in vcs])
@@ -253,6 +262,16 @@ class CaduWindow:
             self.fill_frames()
         self.tree.selection_set(str(number))
         self.tree.see(str(number))
+
+    def open_cadu(self, number: int) -> None:
+        """Show CADU ``number`` in the Frames tab (from the summary tables)."""
+        self.tabs.select(1)
+        self.goto_var.set(str(number))
+        self.goto()
+
+    def copy_report(self) -> None:
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self.summary_text.get("1.0", tk.END))
 
     def show_selected(self) -> None:
         selection = self.tree.selection()
