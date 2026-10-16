@@ -84,7 +84,7 @@ L'elenco frame per frame si aggiunge con `--frames` (o tutti i frame in CSV con 
 
 - **Reed-Solomon check** e **Exclude uncorrectable frames** in alto; la colonna RS dice ok, corr. n (byte
   corretti) o FAIL; senza il controllo Reed-Solomon le caselle che ne dipendono (Exclude uncorrectable frames,
-  Only RS errors) sono tolte e disattivate;
+  Only RS errors) sono tolte e disattivate; con i frame non correggibili esclusi, Only RS errors diventa Only RS-corrected frames (gli unici errori rimasti sono i frame corretti);
 - **Open…** carica il file; interleaving, randomizzazione (Auto / Yes / No) e FECF si cambiano in alto e il file
   viene riletto; accanto al nome del file è scritto se i codeblock sono stati letti come randomizzati;
 - scheda **Summary**: il riepilogo in forma grafica: riquadri con i numeri principali (CADU, FER, frame corretti,

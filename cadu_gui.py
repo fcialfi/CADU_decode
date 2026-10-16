@@ -61,7 +61,7 @@ class CaduWindow:
         ttk.Separator(bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=12)
         self.exclude_var = tk.BooleanVar(value=False)
         self.exclude_box = ttk.Checkbutton(bar, text="Exclude uncorrectable frames", variable=self.exclude_var,
-                                           command=self.refresh)
+                                           command=self._exclude_changed)
         self.exclude_box.pack(side=tk.LEFT)
         ttk.Button(bar, text="Export CSV…", command=self.export_csv).pack(side=tk.RIGHT)
         self.file_var = tk.StringVar(value="No file: press Open… (CADUs starting with the sync marker 1ACFFC1D)")
@@ -229,13 +229,22 @@ class CaduWindow:
             self._busy(False)
 
     def _sync_checks(self) -> None:
-        """The options that need the Reed-Solomon check are unticked and greyed out without it."""
-        state = ["!disabled"] if self.rs_var.get() else ["disabled"]
-        if not self.rs_var.get():
+        """Untick and grey out the options that need the Reed-Solomon check when it is off.
+
+        With the uncorrectable frames excluded, the RS errors left are the corrected frames: the
+        box says so.
+        """
+        rs = self.rs_var.get()
+        if not rs:
             self.exclude_var.set(False)
             self.rserr_var.set(False)
-        self.exclude_box.state(state)
-        self.rserr_box.state(state)
+        self.exclude_box.state(["!disabled"] if rs else ["disabled"])
+        self.rserr_box.state(["!disabled"] if rs else ["disabled"])
+        self.rserr_box.configure(text="Only RS-corrected frames" if self.exclude_var.get() else "Only RS errors")
+
+    def _exclude_changed(self) -> None:
+        self._sync_checks()
+        self.refresh()
 
     def _load(self) -> None:
         interleave = int(self.interleave_var.get())
@@ -328,6 +337,7 @@ class CaduWindow:
             self.rserr_var.set(False)
             if self.exclude_var.get() and self.rows[number - 1].get("rs") == "uncorrectable":
                 self.exclude_var.set(False)
+                self._sync_checks()
                 self.refresh()
             self.fill_frames()
         self.tree.selection_set(str(number))
