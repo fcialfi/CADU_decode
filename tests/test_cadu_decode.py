@@ -167,3 +167,15 @@ def test_rs_codec():
     for p in rng.sample(range(255), 4):
         damaged[p] ^= 0x11
     assert rs_ccsds.decode(bytes(damaged))[1] == -1
+
+
+def test_errors_along_the_file():
+    # 40 CADUs: uncorrectable frames only at the start (1, 2) and at the end (40).
+    frames = [_cadu(k, k) for k in range(40)]
+    for k in (0, 1, 39):
+        frames[k] = _with_errors(frames[k], range(0, 5 * 20, 5))
+    rows = cd.decode_all(b"".join(frames))
+    lines = cd.errors_along_file(rows)
+    assert lines[2].split()[:3] == ["0-10", "%", "1-4"] and lines[2].split()[-1] == "2"  # first part: 2 FAIL
+    assert lines[-2].split()[-1] == "1"  # last part: 1 FAIL
+    assert "First and last 5 % (2 + 2 CADUs): 3 uncorrectable; in between: 0/36 = 0.000e+00" in lines[-1]

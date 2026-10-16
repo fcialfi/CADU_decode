@@ -276,6 +276,35 @@ def clcw_differences(row: dict, usual: dict) -> dict:
     return {k: (usual[k], row[k]) for k in CLCW_KEYS if row[k] != usual[k]}
 
 
+def errors_along_file(rows, segments: int = 10, edge: float = 0.05) -> list[str]:
+    """Reed-Solomon errors in ``segments`` equal parts of the file, and the frame error rate without its edges.
+
+    The CADUs are stored in order of arrival at a constant rate: the position in the file is the time in
+    the pass. Errors grouped at the start and the end come from the acquisition and loss of the signal
+    (low elevation, lock transients); errors spread over the pass are link errors.
+    """
+    n = len(rows)
+    if n < segments or "rs" not in rows[0]:
+        return []
+    table = [("part", "CADUs", "frames", "corrected", "bytes corr.", "bytes/frame", "uncorrectable")]
+    for k in range(segments):
+        part = rows[k * n // segments:(k + 1) * n // segments]
+        corrected = sum(1 for r in part if r["rs"] == "corrected")
+        nbytes = sum(r["rs_corrected"] for r in part)
+        table.append((f"{100 * k // segments}-{100 * (k + 1) // segments} %", f"{part[0]['n']}-{part[-1]['n']}",
+                      len(part), corrected, nbytes, f"{nbytes / len(part):.2f}",
+                      sum(1 for r in part if r["rs"] == "uncorrectable")))
+    lines = ["  Errors along the file (position in the file = time in the pass):"]
+    lines += ["    " + line for line in _table(table, left=1)]
+    cut = max(1, int(n * edge))
+    core = rows[cut:n - cut]
+    edges_bad = sum(1 for r in rows[:cut] + rows[n - cut:] if r["rs"] == "uncorrectable")
+    core_bad = sum(1 for r in core if r["rs"] == "uncorrectable")
+    lines.append(f"  First and last {100 * edge:g} % ({cut} + {cut} CADUs): {edges_bad} uncorrectable; "
+                 f"in between: {core_bad}/{len(core)} = {core_bad / len(core):.3e}" if core else "")
+    return lines
+
+
 def reed_solomon_lines(rows, max_listed: int = 50, list_bad: bool = True) -> list[str]:
     """Reed-Solomon results: frames without errors, corrected, uncorrectable, and the frame error rate.
 
@@ -293,6 +322,7 @@ def reed_solomon_lines(rows, max_listed: int = 50, list_bad: bool = True) -> lis
         f"  Frame error rate (uncorrectable / all): {len(bad)}/{n} = {len(bad) / n:.3e} ({100 * len(bad) / n:.3f} %)",
         f"  Frames with errors before correction: {(status['corrected'] + len(bad)) / n:.3e}",
     ]
+    lines += errors_along_file(rows)
     if bad and list_bad:
         numbers = ", ".join(str(r["n"]) for r in bad[:max_listed])
         lines.append(f"  Uncorrectable CADUs: {numbers}" + (f" ... ({len(bad) - max_listed} more)"
