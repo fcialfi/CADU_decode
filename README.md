@@ -110,7 +110,7 @@ salta la ricostruzione.
 
 `python cadu_gui.py [file]` apre una finestra (Tkinter, incluso in Python):
 
-- in alto la barra blu con il logo Exostaff, nome e versione del programma, la licenza (nell'eseguibile con
+- in alto la barra blu con il logo Exostaff (sotto: "by F. Cialfi"), nome e versione del programma, la licenza (nell'eseguibile con
   licenza), **About** (versione, autore e licenza; anche F1) ed **Exit**;
 - **Reed-Solomon check** e **Exclude uncorrectable frames** in alto; la colonna RS dice ok, corr. n (byte
   corretti) o FAIL; senza il controllo Reed-Solomon le caselle che ne dipendono (Exclude uncorrectable frames,

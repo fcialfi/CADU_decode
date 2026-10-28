@@ -10,3 +10,4 @@ APP_VERSION = "1.0.0"
 
 # Author of the program, shown in the window header, the About box and --version.
 APP_AUTHOR = "Fabio Cialfi"
+APP_AUTHOR_SHORT = "F. Cialfi"  # under the logo in the window header ("by F. Cialfi")

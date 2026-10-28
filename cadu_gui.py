@@ -18,7 +18,7 @@ import cadu_decode as cd
 import licensing
 from detail_view import DetailView
 from summary_view import SummaryView
-from version import APP_AUTHOR, APP_NAME, APP_VERSION
+from version import APP_AUTHOR, APP_AUTHOR_SHORT, APP_NAME, APP_VERSION
 
 COLUMNS = (  # (key, heading, width)
     ("n", "#", 70), ("offset", "Offset", 90), ("scid", "SCID", 55), ("vcid", "VC", 40), ("mc_count", "MCFC", 55),
@@ -224,12 +224,16 @@ class CaduWindow:
         """Navy bar at the top: Exostaff logo, name and version, licence, About and Exit."""
         header = tk.Frame(root, bg=HEADER_BG, padx=16, pady=10)
         header.pack(fill=tk.X)
-        logo = _load_image(LOGO_HEADER_FILE, master=header)
-        if logo is not None:
-            label = tk.Label(header, image=logo, bg=HEADER_BG, bd=0)
-            label.image = logo
-            label.pack(side=tk.LEFT)
         family = tkfont.nametofont("TkDefaultFont").actual("family")
+        brand = tk.Frame(header, bg=HEADER_BG)
+        brand.pack(side=tk.LEFT)
+        logo = _load_image(LOGO_HEADER_FILE, master=brand)
+        if logo is not None:
+            label = tk.Label(brand, image=logo, bg=HEADER_BG, bd=0)
+            label.image = logo
+            label.pack(anchor="w")
+        tk.Label(brand, text=f"by {APP_AUTHOR_SHORT}", bg=HEADER_BG, fg=HEADER_FG_MUTED,
+                 font=(family, 8, "italic")).pack(anchor="e")
         titles = tk.Frame(header, bg=HEADER_BG)
         titles.pack(side=tk.LEFT, padx=(16, 0))
         tk.Label(titles, text=APP_NAME, bg=HEADER_BG, fg=HEADER_FG,
