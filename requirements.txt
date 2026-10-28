@@ -1,2 +1,4 @@
 # numpy: fast Reed-Solomon check of many CADUs (optional: without it the check is much slower).
 numpy
+# cryptography: licence check of the executable (licensing.py, license_tool.py).
+cryptography
