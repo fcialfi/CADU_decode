@@ -1,8 +1,9 @@
 name: Build
 
-# Tests, then CADU-Decoder.exe for Windows, at every push to main (or by hand
-# from the Actions tab). The executable is in the artifact "CADU-Decoder"
-# of the run; a tag v* also attaches it to a GitHub release.
+# Tests, then the CADU-Decoder folder (CADU-Decoder.exe and its libraries) for
+# Windows, at every push to main (or by hand from the Actions tab). The folder
+# is in the artifact "CADU-Decoder" of the run; a tag v* also attaches it, as
+# a zip, to a GitHub release.
 on:
   push:
     branches: [main]
@@ -26,14 +27,17 @@ jobs:
           pip install -r requirements.txt pyinstaller pytest
       - name: Tests
         run: pytest -q
-      - name: Build CADU-Decoder.exe
+      - name: Build the CADU-Decoder folder
         run: pyinstaller --noconfirm cadu_gui.spec
       - uses: actions/upload-artifact@v4
         with:
           name: CADU-Decoder
-          path: dist/CADU-Decoder.exe
+          path: dist/
+      - name: Zip for the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: Compress-Archive -Path dist/CADU-Decoder -DestinationPath "dist/CADU-Decoder_${{ github.ref_name }}.zip"
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/CADU-Decoder.exe
+          files: dist/CADU-Decoder_*.zip
