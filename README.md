@@ -133,22 +133,31 @@ salta la ricostruzione.
 
 ## Eseguibile per Windows
 
-`CADU-Decoder.exe` è la finestra in un unico file: non serve Python sul PC. Si apre con doppio clic; trascinando un
+`CADU-Decoder.exe` è la finestra, nella cartella `CADU-Decoder\` insieme alle sue librerie (in `_internal\`): non
+serve Python sul PC. Si distribuisce l'intera cartella (ad esempio come zip). Si apre con doppio clic; trascinando un
 file di CADU sull'icona lo apre subito. Si chiude con **Exit**, Ctrl+Q o la X della finestra. Ha l'icona e il
 logo Exostaff (cartella `assets/`, inclusa dallo spec) e, se è stata creata la chiave pubblica, il controllo della
 licenza (sezione sotto): in quel caso va consegnato insieme al `license.key` del cliente.
 
-- **Da GitHub**: a ogni push su `main` la action *Build* esegue i test e crea l'eseguibile; si scarica dalla pagina
-  della run (scheda Actions, artifact *CADU-Decoder*, uno zip con dentro l'exe). Un tag `v…` lo allega anche a una
-  release.
-- **In locale**: doppio clic su `build.bat` (crea `.venv` con numpy e PyInstaller la prima volta) →
-  `dist\CADU-Decoder.exe`. A mano: `pip install -r requirements.txt pyinstaller` e `pyinstaller cadu_gui.spec`.
+**Avvio**: appena lanciato l'exe mostra una schermata con il logo Exostaff (`assets/splash.png`: "CADU Decoder,
+Starting up", by F. Cialfi), che si chiude quando la finestra è pronta. È la modalità "cartella", come per il Link
+Budget Tool: parte in pochi secondi perché non deve decomprimere nulla. In `cadu_gui.spec` si può impostare
+`ONEFILE = True` per avere un unico `.exe`, che però a ogni avvio decomprime le librerie (numpy e le altre) in una
+cartella temporanea e parte più lentamente, soprattutto con l'antivirus attivo.
+
+- **Da GitHub**: a ogni push su `main` la action *Build* esegue i test e crea la cartella; si scarica dalla pagina
+  della run (scheda Actions, artifact *CADU-Decoder*, uno zip con dentro la cartella `CADU-Decoder`). Un tag `v…`
+  allega anche lo zip della cartella a una release.
+- **In locale**: doppio clic su `build.bat` (crea `.venv` con numpy, cryptography e PyInstaller la prima volta) →
+  `dist\CADU-Decoder\CADU-Decoder.exe`; `build.bat zip` crea anche `dist\CADU-Decoder_<versione>.zip` da consegnare
+  (dopo averci aggiunto il `license.key` del cliente). A mano: `pip install -r requirements.txt pyinstaller` e
+  `pyinstaller cadu_gui.spec`.
 
 ### Licenza a scadenza dell'eseguibile
 
 L'eseguibile può essere limitato con un file di licenza che scade in una data stabilita (`licensing.py`, lo stesso
 sistema del Satellite Link Budget Tool e dell'HKTM CCSDS Signal Generator). La licenza è un piccolo file
-`license.key`, da mettere nella stessa cartella di `CADU-Decoder.exe`, con il nome del cliente e la data di scadenza,
+`license.key`, da mettere nella cartella `CADU-Decoder`, accanto a `CADU-Decoder.exe`, con il nome del cliente e la data di scadenza,
 firmato con una chiave privata che ha solo chi emette le licenze. L'eseguibile contiene solo la chiave pubblica: può
 verificare una licenza ma non crearne una, e modificare il file (ad esempio la data) la invalida. Senza una licenza
 valida il programma si ferma all'avvio con una spiegazione; la licenza valida è indicata nella barra in alto della

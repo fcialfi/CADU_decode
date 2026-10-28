@@ -199,8 +199,8 @@ class CaduWindow:
         self.summary_text = self._text(report)
         self.summary_text.master.pack(fill=tk.BOTH, expand=True)
 
-        if path:
-            self.load(path)
+        if path:  # after the window is shown, so the progress of the loading is visible
+            root.after(50, lambda: self.load(path))
 
     def _text(self, parent) -> tk.Text:
         box = ttk.Frame(parent)
@@ -531,19 +531,33 @@ class CaduWindow:
         messagebox.showinfo("Export CSV", f"{len(rows)} frames written to {path}")
 
 
+def _close_splash() -> None:
+    """Close the splash screen of the packaged executable (shown by the bootloader, see cadu_gui.spec)."""
+    try:
+        import pyi_splash  # only in a PyInstaller build with a splash screen
+
+        pyi_splash.close()
+    except Exception:
+        pass
+
+
 def main() -> None:
     root = tk.Tk()
+    root.withdraw()  # shown once complete: the splash stays up until then
     # Packaged executable only (see licensing.py): stop here with an explanation if the licence is
     # missing, invalid or expired.
     status = licensing.check_license()
     if not status.valid:
-        root.withdraw()
+        _close_splash()
         _set_icon(root)
         messagebox.showerror(f"{licensing.PRODUCT}: licence not valid",
                              f"{status.message}\n\nContact the supplier for a new licence file.", parent=root)
         root.destroy()
         raise SystemExit(1)
     CaduWindow(root, sys.argv[1] if len(sys.argv) > 1 else None, license_status=status)
+    root.deiconify()
+    root.update_idletasks()
+    _close_splash()
     root.mainloop()
 
 

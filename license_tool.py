@@ -59,6 +59,11 @@ def issue(args) -> int:
     except ValueError:
         print("ERROR: --expires must be a date as YYYY-MM-DD", file=sys.stderr)
         return 1
+    if not os.path.isfile(args.private_key):
+        print(f"ERROR: private key not found: {args.private_key}\n"
+              "Check the path (the one given to keygen), or create the key pair first with:\n"
+              "  python license_tool.py keygen --private-key <path of the private key>", file=sys.stderr)
+        return 1
     with open(args.private_key, "rb") as f:
         key = load_pem_private_key(f.read(), password=None)
     lic = licensing.sign_license(key, args.customer, expires)
@@ -69,6 +74,10 @@ def issue(args) -> int:
 
 
 def verify(args) -> int:
+    for label, path in (("licence file", args.license), ("public key", args.public_key)):
+        if not os.path.isfile(path):
+            print(f"ERROR: {label} not found: {path}", file=sys.stderr)
+            return 1
     with open(args.license, encoding="utf-8") as f:
         data = json.load(f)
     status = licensing.verify_license(data, licensing.load_public_key(args.public_key),
