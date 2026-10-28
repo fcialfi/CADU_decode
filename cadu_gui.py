@@ -263,6 +263,7 @@ class CaduWindow:
 
     def exit_app(self) -> None:
         """Close the program: the Exit button, Ctrl+Q and the window close button."""
+        self.root.quit()
         self.root.destroy()
 
     def open_file(self) -> None:
@@ -541,6 +542,26 @@ def _close_splash() -> None:
         pass
 
 
+def _show_startup_error(root: tk.Tk, title: str, message: str) -> None:
+    """Error before the window exists (licence not valid), always in sight.
+
+    A Tk message box whose parent window is hidden can open behind the other windows and without a button in
+    the task bar: the program then looks closed but keeps running, waiting for an OK nobody sees. On Windows the
+    system message box is used instead, on top of every window and in the task bar.
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            MB_ICONERROR, MB_SETFOREGROUND, MB_TOPMOST = 0x10, 0x10000, 0x40000
+            ctypes.windll.user32.MessageBoxW(None, message, title, MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST)
+            return
+        except Exception:
+            pass
+    root.attributes("-topmost", True)
+    messagebox.showerror(title, message, parent=root)
+
+
 def main() -> None:
     root = tk.Tk()
     root.withdraw()  # shown once complete: the splash stays up until then
@@ -550,8 +571,8 @@ def main() -> None:
     if not status.valid:
         _close_splash()
         _set_icon(root)
-        messagebox.showerror(f"{licensing.PRODUCT}: licence not valid",
-                             f"{status.message}\n\nContact the supplier for a new licence file.", parent=root)
+        _show_startup_error(root, f"{licensing.PRODUCT}: licence not valid",
+                            f"{status.message}\n\nContact the supplier for a new licence file.")
         root.destroy()
         raise SystemExit(1)
     CaduWindow(root, sys.argv[1] if len(sys.argv) > 1 else None, license_status=status)
