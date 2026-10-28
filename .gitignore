@@ -5,3 +5,6 @@ __pycache__/
 build/
 dist/
 .venv/
+# Licences and private keys stay out of the repository (the public key in assets/ is committed).
+license.key
+*private_key*.pem

@@ -4,6 +4,8 @@
     python cadu_gui.py [capture.bin]
 
 Tkinter only (part of Python). The decoding is the one of cadu_decode.py.
+
+Author: Fabio Cialfi (Exostaff). Proprietary software, see LICENSE.
 """
 
 import csv
@@ -13,8 +15,10 @@ import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 import cadu_decode as cd
+import licensing
 from detail_view import DetailView
 from summary_view import SummaryView
+from version import APP_AUTHOR, APP_AUTHOR_SHORT, APP_NAME, APP_VERSION
 
 COLUMNS = (  # (key, heading, width)
     ("n", "#", 70), ("offset", "Offset", 90), ("scid", "SCID", 55), ("vcid", "VC", 40), ("mc_count", "MCFC", 55),
@@ -24,9 +28,51 @@ COLUMNS = (  # (key, heading, width)
 )
 ALL = "All"
 
+# Navy header with the Exostaff logo, as in the other Exostaff tools.
+HEADER_BG, HEADER_FG, HEADER_FG_MUTED, HEADER_HOVER = "#1f2a36", "#ffffff", "#b8c4d0", "#2c3b4b"
+WARNING_ON_DARK = "#ffb74d"  # licence expiring soon
+
+# Logo and icon images (assets/), found next to this file or, in the packaged
+# executable, in PyInstaller's extraction folder.
+_ASSETS_DIR = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))), "assets")
+LOGO_HEADER_FILE = "exostaff_logo_header.png"  # 44 px high, for the window header
+ICON_FILE = "exostaff_icon.ico"
+ICON_PNG_FILE = "exostaff_icon_64.png"
+
+
+def _asset_path(name: str):
+    """Path of an assets/ file, or None when it is missing."""
+    path = os.path.join(_ASSETS_DIR, name)
+    return path if os.path.isfile(path) else None
+
+
+def _load_image(name: str, master=None):
+    """An assets/ PNG as a Tk image, or None when missing or unreadable (keep a reference to it)."""
+    path = _asset_path(name)
+    if path is None:
+        return None
+    try:
+        return tk.PhotoImage(file=path, master=master)
+    except tk.TclError:
+        return None
+
+
+def _set_icon(root: tk.Tk) -> None:
+    """Exostaff icon in the title bar and the task bar."""
+    icon = _asset_path(ICON_FILE)
+    if icon and sys.platform == "win32":
+        try:
+            root.iconbitmap(default=icon)
+        except tk.TclError:
+            pass
+    image = _load_image(ICON_PNG_FILE, master=root)
+    if image is not None:
+        root._icon_image = image
+        root.iconphoto(True, image)
+
 
 class CaduWindow:
-    def __init__(self, root: tk.Tk, path=None):
+    def __init__(self, root: tk.Tk, path=None, license_status=None):
         self.root = root
         self.data = b""
         self.rows: list[dict] = []
@@ -35,10 +81,13 @@ class CaduWindow:
         self.randomized = True
         self.usual = None
         self.packets = None
-        root.title("CADU Decoder")
-        root.geometry("1250x820")
+        self.license_status = license_status or licensing.check_license()
+        root.title(f"{APP_NAME} {APP_VERSION}")
+        root.geometry("1250x880")
+        _set_icon(root)
         self.mono = tkfont.nametofont("TkFixedFont").copy()
         self.mono.configure(size=10)
+        self._header(root)
 
         bar = ttk.Frame(root, padding=(10, 8))
         bar.pack(fill=tk.X)
@@ -64,14 +113,14 @@ class CaduWindow:
         self.exclude_box = ttk.Checkbutton(bar, text="Exclude uncorrectable frames", variable=self.exclude_var,
                                            command=self._exclude_changed)
         self.exclude_box.pack(side=tk.LEFT)
-        ttk.Button(bar, text="Exit", command=self.exit_app).pack(side=tk.RIGHT)
         export = ttk.Menubutton(bar, text="Export")
         menu = tk.Menu(export, tearoff=False)
         menu.add_command(label="Frames to CSV…", command=self.export_csv)
         menu.add_command(label="Packets, one file per APID…", command=self.export_packets)
         export["menu"] = menu
-        export.pack(side=tk.RIGHT, padx=(0, 8))
+        export.pack(side=tk.RIGHT)
         root.bind_all("<Control-q>", lambda _e: self.exit_app())
+        root.bind_all("<F1>", lambda _e: self.show_about())
         root.protocol("WM_DELETE_WINDOW", self.exit_app)
         self.file_var = tk.StringVar(value="No file: press Open… (CADUs starting with the sync marker 1ACFFC1D)")
         status = ttk.Frame(root, padding=(10, 0))
@@ -170,6 +219,45 @@ class CaduWindow:
         widget.delete("1.0", tk.END)
         widget.insert("1.0", "\n".join(lines))
         widget.configure(state="disabled")
+
+    def _header(self, root: tk.Tk) -> None:
+        """Navy bar at the top: Exostaff logo, name and version, licence, About and Exit."""
+        header = tk.Frame(root, bg=HEADER_BG, padx=16, pady=10)
+        header.pack(fill=tk.X)
+        family = tkfont.nametofont("TkDefaultFont").actual("family")
+        brand = tk.Frame(header, bg=HEADER_BG)
+        brand.pack(side=tk.LEFT)
+        logo = _load_image(LOGO_HEADER_FILE, master=brand)
+        if logo is not None:
+            label = tk.Label(brand, image=logo, bg=HEADER_BG, bd=0)
+            label.image = logo
+            label.pack(anchor="w")
+        tk.Label(brand, text=f"by {APP_AUTHOR_SHORT}", bg=HEADER_BG, fg=HEADER_FG_MUTED,
+                 font=(family, 8, "italic")).pack(anchor="e")
+        titles = tk.Frame(header, bg=HEADER_BG)
+        titles.pack(side=tk.LEFT, padx=(16, 0))
+        tk.Label(titles, text=APP_NAME, bg=HEADER_BG, fg=HEADER_FG,
+                 font=(family, 15, "bold")).pack(anchor="w")
+        tk.Label(titles, text=f"Version {APP_VERSION}  ·  CCSDS TM CADUs: frames, Reed-Solomon, packets",
+                 bg=HEADER_BG, fg=HEADER_FG_MUTED, font=(family, 9)).pack(anchor="w")
+        for text, command in (("Exit", self.exit_app), ("About", self.show_about)):
+            tk.Button(header, text=text, command=command, bg=HEADER_HOVER, fg=HEADER_FG,
+                      activebackground=HEADER_FG_MUTED, activeforeground=HEADER_BG, relief="flat", bd=0,
+                      padx=14, pady=4, cursor="hand2").pack(side=tk.RIGHT, padx=(12, 0))
+        license_text = self.license_status.summary()
+        if license_text:
+            tk.Label(header, text=license_text, bg=HEADER_BG, font=(family, 9),
+                     fg=WARNING_ON_DARK if self.license_status.expiring_soon else HEADER_FG_MUTED,
+                     ).pack(side=tk.RIGHT, padx=(12, 0))
+
+    def show_about(self) -> None:
+        """Version, author and licence of the program (About button and F1)."""
+        lines = [f"{APP_NAME} {APP_VERSION}", "Decoder of CCSDS TM CADUs: transfer frames, Reed-Solomon, packets",
+                 "", f"Author: {APP_AUTHOR}", "Copyright © 2026 Fabio Cialfi (Exostaff). All rights reserved."]
+        license_text = self.license_status.summary()
+        if license_text:
+            lines += ["", license_text]
+        messagebox.showinfo("About", "\n".join(lines), parent=self.root)
 
     # --- file ---
 
@@ -445,7 +533,17 @@ class CaduWindow:
 
 def main() -> None:
     root = tk.Tk()
-    CaduWindow(root, sys.argv[1] if len(sys.argv) > 1 else None)
+    # Packaged executable only (see licensing.py): stop here with an explanation if the licence is
+    # missing, invalid or expired.
+    status = licensing.check_license()
+    if not status.valid:
+        root.withdraw()
+        _set_icon(root)
+        messagebox.showerror(f"{licensing.PRODUCT}: licence not valid",
+                             f"{status.message}\n\nContact the supplier for a new licence file.", parent=root)
+        root.destroy()
+        raise SystemExit(1)
+    CaduWindow(root, sys.argv[1] if len(sys.argv) > 1 else None, license_status=status)
     root.mainloop()
 
 

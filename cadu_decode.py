@@ -30,6 +30,8 @@ sequence counters.
 
 The input is binary, or text with the bytes in hexadecimal (spaces and line
 breaks ignored).
+
+Author: Fabio Cialfi (Exostaff). Proprietary software, see LICENSE.
 """
 
 import argparse
@@ -39,6 +41,7 @@ import sys
 from collections import Counter
 
 import rs_ccsds
+from version import APP_AUTHOR, APP_NAME, APP_VERSION
 
 ASM = bytes.fromhex("1ACFFC1D")
 RS_N, RS_K = 255, 223
@@ -913,6 +916,7 @@ def show_cadu(number: int, row: dict, data: bytes, interleave: int, randomized: 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("file", help="file of CADUs (binary, or hexadecimal text)")
+    ap.add_argument("--version", action="version", version=f"{APP_NAME} {APP_VERSION} - author: {APP_AUTHOR}")
     ap.add_argument("--interleave", type=int, default=5, help="RS interleaving depth I (default 5: 1279-byte CADU)")
     ap.add_argument("--randomization", choices=("auto", "yes", "no"), default="auto",
                     help="whether the codeblocks are randomized: auto (default: detected from the frames), yes, "

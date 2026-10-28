@@ -6,6 +6,9 @@ rem folder. It creates the .venv the first time and installs numpy and
 rem PyInstaller into it (later runs only add what is missing), deletes the
 rem old build and dist folders and builds dist\CADU-Decoder.exe: a single
 rem file, to copy anywhere (Python not needed on the target PC).
+rem
+rem The licence file (license.key) is per customer: send it with the exe, to
+rem put in the same folder (see README, Licenza a scadenza dell'eseguibile).
 
 setlocal
 cd /d "%~dp0"
@@ -33,6 +36,11 @@ echo === Building CADU-Decoder.exe
 
 echo.
 echo Done: dist\CADU-Decoder.exe
+if exist assets\license_public_key.pem (
+    echo Licence check on: send the customer's license.key with the exe.
+) else (
+    echo No assets\license_public_key.pem: this exe has no licence check.
+)
 pause
 exit /b 0
 

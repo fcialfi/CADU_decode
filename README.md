@@ -2,6 +2,8 @@
 
 Decodifica i campi fissi dei transfer frame contenuti in un file di CADU (CCSDS TM).
 
+**Autore:** Fabio Cialfi (Exostaff). Software proprietario: vedi [Licenza](#licenza).
+
 Un CADU (CCSDS 131.0-B) è il sync marker a 32 bit `1ACFFC1D` seguito dal codeblock: il transfer frame TM
 (CCSDS 132.0-B) e i simboli di controllo Reed-Solomon (255,223), con il codeblock randomizzato dal
 pseudo-randomizer CCSDS. Con interleaving I = 5 il CADU è di 4 + 255·5 = 1279 byte e il transfer frame di
@@ -108,6 +110,8 @@ salta la ricostruzione.
 
 `python cadu_gui.py [file]` apre una finestra (Tkinter, incluso in Python):
 
+- in alto la barra blu con il logo Exostaff (sotto: "by F. Cialfi"), nome e versione del programma, la licenza (nell'eseguibile con
+  licenza), **About** (versione, autore e licenza; anche F1) ed **Exit**;
 - **Reed-Solomon check** e **Exclude uncorrectable frames** in alto; la colonna RS dice ok, corr. n (byte
   corretti) o FAIL; senza il controllo Reed-Solomon le caselle che ne dipendono (Exclude uncorrectable frames,
   Only RS errors) sono tolte e disattivate; con i frame non correggibili esclusi, Only RS errors diventa Only RS-corrected frames (gli unici errori rimasti sono i frame corretti);
@@ -130,13 +134,44 @@ salta la ricostruzione.
 ## Eseguibile per Windows
 
 `CADU-Decoder.exe` è la finestra in un unico file: non serve Python sul PC. Si apre con doppio clic; trascinando un
-file di CADU sull'icona lo apre subito. Si chiude con **Exit**, Ctrl+Q o la X della finestra.
+file di CADU sull'icona lo apre subito. Si chiude con **Exit**, Ctrl+Q o la X della finestra. Ha l'icona e il
+logo Exostaff (cartella `assets/`, inclusa dallo spec) e, se è stata creata la chiave pubblica, il controllo della
+licenza (sezione sotto): in quel caso va consegnato insieme al `license.key` del cliente.
 
 - **Da GitHub**: a ogni push su `main` la action *Build* esegue i test e crea l'eseguibile; si scarica dalla pagina
   della run (scheda Actions, artifact *CADU-Decoder*, uno zip con dentro l'exe). Un tag `v…` lo allega anche a una
   release.
 - **In locale**: doppio clic su `build.bat` (crea `.venv` con numpy e PyInstaller la prima volta) →
   `dist\CADU-Decoder.exe`. A mano: `pip install -r requirements.txt pyinstaller` e `pyinstaller cadu_gui.spec`.
+
+### Licenza a scadenza dell'eseguibile
+
+L'eseguibile può essere limitato con un file di licenza che scade in una data stabilita (`licensing.py`, lo stesso
+sistema del Satellite Link Budget Tool e dell'HKTM CCSDS Signal Generator). La licenza è un piccolo file
+`license.key`, da mettere nella stessa cartella di `CADU-Decoder.exe`, con il nome del cliente e la data di scadenza,
+firmato con una chiave privata che ha solo chi emette le licenze. L'eseguibile contiene solo la chiave pubblica: può
+verificare una licenza ma non crearne una, e modificare il file (ad esempio la data) la invalida. Senza una licenza
+valida il programma si ferma all'avvio con una spiegazione; la licenza valida è indicata nella barra in alto della
+finestra e in About, in arancione negli ultimi 30 giorni. Mettere indietro l'orologio del PC non serve: la data più
+recente vista è ricordata nel profilo dell'utente. Lanciato da sorgente (`python cadu_gui.py`) il programma non
+chiede mai la licenza.
+
+1. **Una volta sola:** crea la coppia di chiavi (serve `pip install cryptography`):
+   ```
+   python license_tool.py keygen --private-key C:\secure\cadu_decoder_license_private_key.pem
+   git add assets\license_public_key.pem
+   git commit -m "Add licence public key"
+   ```
+   - La **chiave privata** va dove indichi: tienila al sicuro e fuori dal repository. Chi la possiede può emettere
+     licenze; se va persa servono una nuova coppia di chiavi e un nuovo eseguibile.
+   - La **chiave pubblica** va in `assets/license_public_key.pem` e va nel repository: ogni eseguibile costruito da
+     quel momento (in locale o dalla action *Build*) verifica la licenza. Gli eseguibili costruiti senza questo file
+     non hanno il controllo. Se il file esiste già, non rifare le chiavi: le licenze già emesse non varrebbero più.
+2. **Per ogni cliente:** emetti una licenza e inviala insieme all'eseguibile:
+   ```
+   python license_tool.py issue --private-key C:\secure\cadu_decoder_license_private_key.pem --customer "Nome cliente" --expires 2027-12-31 -o license.key
+   ```
+3. **Verifica facoltativa:** `python license_tool.py verify license.key`
 
 ## Uso
 
@@ -163,3 +198,8 @@ Il file può essere binario oppure testo con i byte in esadecimale (spazi e a ca
 pip install pytest
 pytest
 ```
+
+## Licenza
+
+Copyright (c) 2026 Fabio Cialfi (Exostaff). Software proprietario, tutti i diritti riservati: vedi
+[LICENSE](LICENSE). L'uso dell'eseguibile richiede una licenza cliente valida (`license.key`).
