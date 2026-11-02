@@ -148,6 +148,32 @@ def first_header_pointer_text(fhp: int) -> str:
     return str(fhp)
 
 
+def concatenate(parts) -> tuple[bytes, list[tuple[int, str]]]:
+    """Files read one after the other as one stream (chunks of one capture): ``parts`` is a list of
+    (name, bytes). Returns the stream and the bounds, (start offset, name) of each file."""
+    bounds, start = [], 0
+    for name, data in parts:
+        bounds.append((start, name))
+        start += len(data)
+    return b"".join(data for _, data in parts), bounds
+
+
+def tag_files(rows, bounds) -> None:
+    """Add to each row the file it starts in and its offset there ("file", "file_offset")."""
+    k = 0
+    for r in rows:
+        while k + 1 < len(bounds) and bounds[k + 1][0] <= r["offset"]:
+            k += 1
+        r["file"], r["file_offset"] = bounds[k][1], r["offset"] - bounds[k][0]
+
+
+def position_text(row: dict) -> str:
+    """Where a frame is: "byte N of the file", or of one of the files concatenated."""
+    if "file" in row:
+        return f"byte {row['file_offset']} of {row['file']}"
+    return f"byte {row['offset']} of the file"
+
+
 def read_input(path: str) -> bytes:
     with open(path, "rb") as f:
         data = f.read()
@@ -742,6 +768,10 @@ def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50, all_rows=N
     all_rows = rows if all_rows is None else all_rows
     n = len(all_rows)
     lines = [f"{unit}: {n} of {cadu_len} bytes ({n * cadu_len} bytes)"]
+    if n and "file" in all_rows[0]:
+        per_file = Counter(r["file"] for r in all_rows)
+        lines.append("Files concatenated (frames starting in each): "
+                     + ", ".join(f"{name} {count}" for name, count in per_file.items()))
     if n * cadu_len < data_len and unit != "CADUs":
         lines.append(f"  {data_len - n * cadu_len} bytes at the end of the file are not a whole frame")
     lines += (reed_solomon_lines(all_rows, max_listed, list_bad=len(rows) == n) if unit == "CADUs"
@@ -809,12 +839,14 @@ def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50, all_rows=N
 
 
 def frame_lines(rows) -> list[str]:
-    head = ("#", "offset", "ver", "SCID", "VC", "OCF", "MCFC", "VCFC", "SH", "sync", "order", "seg", "FHP",
-            "CLCW VC", "COP", "lockout", "wait", "retx", "FARM-B", "report", "RS")
+    files = bool(rows) and "file" in rows[0]  # files concatenated: where each frame comes from
+    head = ("#", "offset", *(("file", "file offset") if files else ()), "ver", "SCID", "VC", "OCF", "MCFC", "VCFC",
+            "SH", "sync", "order", "seg", "FHP", "CLCW VC", "COP", "lockout", "wait", "retx", "FARM-B", "report", "RS")
     table = [head]
     for k, r in enumerate(rows, start=1):
         table.append((
-            r.get("n", k), r["offset"], r["version"], r["scid"], r["vcid"], r["ocf_flag"], r["mc_count"], r["vc_count"],
+            r.get("n", k), r["offset"], *((r["file"], r["file_offset"]) if files else ()), r["version"], r["scid"],
+            r["vcid"], r["ocf_flag"], r["mc_count"], r["vc_count"],
             r["sec_header_flag"], r["sync_flag"], r["packet_order_flag"], r["segment_length_id"],
             first_header_pointer_text(r["first_header_pointer"]),
             *([r["clcw_vcid"], r["cop_in_effect"], r["lockout"], r["wait"], r["retransmit"], r["farm_b_counter"],
@@ -944,11 +976,11 @@ def show_cadu(number: int, row: dict, data: bytes, interleave: int, randomized: 
     if row["sec_header_flag"]:
         start += (frame[6] & 0x3F) + 1
     if frame_length:
-        lines = [f"Transfer frame #{number} at byte {row['offset']} of the file ({len(cadu)} bytes)",
+        lines = [f"Transfer frame #{number} at {position_text(row)} ({len(cadu)} bytes)",
                  f"Frame: {'de-randomized' if randomized else 'not randomized'}; no sync marker, "
                  "no Reed-Solomon code (file of transfer frames)"]
     else:
-        lines = [f"CADU #{number} at byte {row['offset']} of the file ({len(cadu)} bytes)",
+        lines = [f"CADU #{number} at {position_text(row)} ({len(cadu)} bytes)",
                  f"Sync marker: {cadu[:4].hex().upper()}" + ("" if cadu[:4] == ASM else "  (not 1ACFFC1D)"),
                  f"Codeblock: {'de-randomized' if randomized else 'not randomized'}; transfer frame {frame_len} "
                  f"bytes, RS check symbols {len(codeblock) - frame_len} bytes"]
@@ -1007,7 +1039,11 @@ def show_cadu(number: int, row: dict, data: bytes, interleave: int, randomized: 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("file", help="file of CADUs or of transfer frames (binary, or hexadecimal text)")
+    ap.add_argument("file", nargs="+", help="file of CADUs or of transfer frames (binary, or hexadecimal text); "
+                                            "several files: one summary each, or one stream with --concat")
+    ap.add_argument("--concat", action="store_true",
+                    help="read the files one after the other as one stream (chunks of one capture, in the order "
+                         "given): one summary; every frame says which file it comes from")
     ap.add_argument("--version", action="version", version=f"{APP_NAME} {APP_VERSION} - author: {APP_AUTHOR}")
     ap.add_argument("--input", choices=("auto", "cadu", "frames"), default="auto",
                     help="what the file holds: cadu (sync marker 1ACFFC1D + codeblock), frames (bare transfer "
@@ -1059,8 +1095,25 @@ def main(argv=None) -> int:
         ap.error("--frame-length applies to a file of transfer frames, not of CADUs")
     if args.frame_length and not 8 <= args.frame_length <= MAX_FRAME_LEN:
         ap.error(f"the frame length must be 8 to {MAX_FRAME_LEN} bytes")
+    if len(args.file) > 1 and not args.concat and (args.output or args.export_packets):
+        ap.error("-o and --export-packets with several files need --concat (one stream)")
 
-    data = read_input(args.file)
+    if args.concat and len(args.file) > 1:
+        import os
+
+        data, bounds = concatenate([(os.path.basename(f), read_input(f)) for f in args.file])
+        return _analyse(args, ap, f"{len(args.file)} files concatenated ({', '.join(args.file)})", data,
+                        checked_apids, bounds)
+    code = 0
+    for k, name in enumerate(args.file):
+        if k:
+            print("\n" + "=" * 100 + "\n")
+        code = max(code, _analyse(args, ap, name, read_input(name), checked_apids))
+    return code
+
+
+def _analyse(args, ap, name: str, data: bytes, checked_apids, bounds=None) -> int:
+    """Summary (or --show, -o, --export-packets) of one file, or of files concatenated (``bounds``)."""
     kind = "frames" if args.frame_length else args.input
     if kind == "auto":
         kind = detect_input(data, args.interleave)
@@ -1085,13 +1138,15 @@ def main(argv=None) -> int:
     else:
         rows = decode_all(data, args.interleave, randomized, args.fecf, reed_solomon=not args.no_rs,
                           frame_length=frame_length)
+    if bounds:
+        tag_files(rows, bounds)
     sync_len, block_len, frame_len = layout(args.interleave, frame_length)
     cadu_len = sync_len + block_len
     if frame_length:
-        print(f"{args.file}: {len(data)} bytes; transfer frames of {frame_len} bytes ({length_how}), "
+        print(f"{name}: {len(data)} bytes; transfer frames of {frame_len} bytes ({length_how}), "
               f"no sync marker, no Reed-Solomon code; frames {how}")
     else:
-        print(f"{args.file}: {len(data)} bytes; CADU {cadu_len} bytes, transfer frame {frame_len} "
+        print(f"{name}: {len(data)} bytes; CADU {cadu_len} bytes, transfer frame {frame_len} "
               f"bytes (I = {args.interleave}); codeblocks {how}")
     if not rows:
         print("The file is shorter than one transfer frame." if frame_length else "No sync marker 1ACFFC1D found.")

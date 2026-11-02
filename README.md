@@ -44,6 +44,22 @@ senza sync marker e senza simboli Reed-Solomon. I byte in fondo al file che non 
     python cadu_decode.py frames.bin                       # riconosciuto da solo
     python cadu_decode.py frames.bin --frame-length 1115   # lunghezza imposta
 
+## Più file
+
+Si possono dare più file insieme. Senza altre opzioni ognuno ha il suo riepilogo, uno dopo l'altro; con `--concat`
+i file sono letti uno dopo l'altro come un unico flusso, nell'ordine dato (pezzi di una stessa acquisizione, anche
+tagliati a metà di un CADU o di un frame): un solo riepilogo, contatori e pacchetti continui da un file all'altro.
+Ogni frame dice da quale file viene e dove (`--frames`, `-o`, `--show`: "CADU #4 at byte 837 of pass_2.bin"); il
+riepilogo dice quanti frame iniziano in ogni file. `-o` ed `--export-packets` con più file chiedono `--concat`.
+
+    python cadu_decode.py pass_1.bin pass_2.bin pass_3.bin            # un riepilogo per file
+    python cadu_decode.py pass_1.bin pass_2.bin pass_3.bin --concat   # un flusso unico
+
+Nella finestra **Open…** accetta più file (Ctrl o Maiusc + clic), e così anche più file trascinati sull'icona:
+il menu **File** sotto la barra sceglie quello da vedere (riepilogo, frame e pacchetti di quel file) e, in fondo,
+*All files, concatenated* li unisce in ordine di nome; la tabella dei frame ha allora la colonna **File** e
+l'offset è quello nel file.
+
 ## Reed-Solomon e FER
 
 Lo script decodifica il codice Reed-Solomon (255,223) CCSDS (`rs_ccsds.py`: campo con x⁸ + x⁷ + x² + x + 1,

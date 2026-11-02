@@ -21,12 +21,13 @@ from summary_view import SummaryView
 from version import APP_AUTHOR, APP_AUTHOR_SHORT, APP_NAME, APP_VERSION
 
 COLUMNS = (  # (key, heading, width)
-    ("n", "#", 70), ("offset", "Offset", 90), ("scid", "SCID", 55), ("vcid", "VC", 40), ("mc_count", "MCFC", 55),
+    ("n", "#", 70), ("file", "File", 160), ("offset", "Offset", 90), ("scid", "SCID", 55), ("vcid", "VC", 40), ("mc_count", "MCFC", 55),
     ("vc_count", "VCFC", 55), ("fhp", "FHP", 150), ("segment_length_id", "Seg", 40), ("ocf_flag", "OCF", 40),
     ("clcw_vcid", "CLCW VC", 80), ("cop_in_effect", "COP", 45), ("flags", "CLCW flags", 140),
     ("report_value", "Report", 60), ("rs", "RS", 75),
 )
 ALL = "All"
+CONCATENATED = "All files, concatenated"
 
 # Navy header with the Exostaff logo, as in the other Exostaff tools.
 HEADER_BG, HEADER_FG, HEADER_FG_MUTED, HEADER_HOVER = "#1f2a36", "#ffffff", "#b8c4d0", "#2c3b4b"
@@ -73,8 +74,11 @@ def _set_icon(root: tk.Tk) -> None:
 
 class CaduWindow:
     def __init__(self, root: tk.Tk, path=None, license_status=None):
+        """``path``: a file, or a list of files, to open at once."""
         self.root = root
         self.data = b""
+        self.files: list[tuple[str, bytes]] = []  # files opened (path, content), in order of name
+        self.bounds = None  # files concatenated: (start offset, name) of each, see cadu_decode.concatenate
         self.rows: list[dict] = []
         self.path = None
         self.cadu_len = 0
@@ -142,7 +146,13 @@ class CaduWindow:
                                            "or bare transfer frames)")
         status = ttk.Frame(root, padding=(10, 0))
         status.pack(fill=tk.X)
-        ttk.Label(status, textvariable=self.file_var).pack(side=tk.LEFT)
+        # Several files opened: the one shown, or all of them as one stream (chunks of one capture)
+        self.choice_var = tk.StringVar()
+        self.choice_label = ttk.Label(status, text="File")
+        self.choice_box = ttk.Combobox(status, textvariable=self.choice_var, width=34, state="readonly")
+        self.choice_box.bind("<<ComboboxSelected>>", lambda _e: self.select_file())
+        self.file_label = ttk.Label(status, textvariable=self.file_var)
+        self.file_label.pack(side=tk.LEFT)
         # Progress of the loading, shown only while a file is read and analysed.
         self.progress = ttk.Progressbar(status, mode="determinate", maximum=100, length=320)
         self.progress_label = ttk.Label(status, width=8, anchor="e")
@@ -189,10 +199,12 @@ class CaduWindow:
         panes = ttk.PanedWindow(frames_tab, orient=tk.VERTICAL)
         panes.pack(fill=tk.BOTH, expand=True)
         table_box = ttk.Frame(panes)
-        self.tree = ttk.Treeview(table_box, columns=[c[0] for c in COLUMNS], show="headings", height=9)
+        self.tree = ttk.Treeview(table_box, columns=[c[0] for c in COLUMNS], show="headings", height=9,
+                                 displaycolumns=[c[0] for c in COLUMNS if c[0] != "file"])
         for key, heading, width in COLUMNS:
             self.tree.heading(key, text=heading)
-            self.tree.column(key, width=width, anchor="e" if key not in ("fhp", "flags") else "w", stretch=False)
+            self.tree.column(key, width=width, anchor="e" if key not in ("fhp", "flags", "file") else "w",
+                             stretch=False)
         scroll = ttk.Scrollbar(table_box, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -283,10 +295,10 @@ class CaduWindow:
         self.root.destroy()
 
     def open_file(self) -> None:
-        path = filedialog.askopenfilename(title="Open a file of CADUs or transfer frames",
-                                          filetypes=[("All files", "*.*"), ("Binary", "*.bin *.dat *.raw")])
-        if path:
-            self.load(path)
+        paths = filedialog.askopenfilenames(title="Open files of CADUs or transfer frames (one or more)",
+                                            filetypes=[("All files", "*.*"), ("Binary", "*.bin *.dat *.raw")])
+        if paths:
+            self.load(list(paths))
 
     # Overall share of the progress bar taken by each stage of the loading.
     STAGES = {"read": (0, 5), "frames": (5, 30), "reed-solomon": (30, 70), "packets": (70, 85),
@@ -325,12 +337,17 @@ class CaduWindow:
         self.file_var.set(f"{name}: {self.STAGE_TEXT[stage]}…")
         self.root.update()
 
-    def load(self, path: str) -> None:
-        previous, self.path = self.path, path
+    def load(self, paths) -> None:
+        """Open one file or several (a list): the first is shown, the others are chosen in File."""
+        paths = sorted([paths] if isinstance(paths, str) else paths, key=lambda p: os.path.basename(p).lower())
+        previous, self.path = self.path, paths[0]
         self._busy(True)
+        files = []
         try:
-            self._step("read")
-            data = cd.read_input(path)
+            for k, path in enumerate(paths):
+                self.path = path
+                self._step("read", k, len(paths))
+                files.append((path, cd.read_input(path)))
         except OSError as exc:
             self.path = previous
             self._busy(False)
@@ -339,8 +356,33 @@ class CaduWindow:
         except BaseException:
             self._busy(False)
             raise
-        self.data = data
-        self.reload(busy=True)
+        self.files = files
+        names = [os.path.basename(p) for p, _ in files]
+        self.file_label.pack_forget()
+        if len(files) > 1:
+            self.choice_box.configure(values=names + [CONCATENATED])
+            self.choice_label.pack(side=tk.LEFT)
+            self.choice_box.pack(side=tk.LEFT, padx=(4, 10))
+        else:
+            self.choice_label.pack_forget()
+            self.choice_box.pack_forget()
+        self.file_label.pack(side=tk.LEFT)
+        self.choice_var.set(names[0])
+        self.select_file(busy=True)
+
+    def select_file(self, busy: bool = False) -> None:
+        """Show the file chosen in File, or all the files read one after the other as one stream."""
+        if not self.files:
+            return
+        choice = self.choice_var.get()
+        if choice == CONCATENATED:
+            self.data, self.bounds = cd.concatenate([(os.path.basename(p), d) for p, d in self.files])
+            self.path = f"{len(self.files)} files concatenated"
+        else:
+            self.path, self.data = next((p, d) for p, d in self.files if os.path.basename(p) == choice)
+            self.bounds = None
+        self.tree.configure(displaycolumns=[c[0] for c in COLUMNS if c[0] != "file" or self.bounds])
+        self.reload(busy=busy)
 
     def reload(self, busy: bool = False) -> None:
         self._sync_checks()
@@ -414,6 +456,8 @@ class CaduWindow:
         self.rows = cd.decode_all(self.data, interleave, self.randomized, self.fecf_var.get(),
                                   reed_solomon=self.rs_var.get(), progress=self._step,
                                   frame_length=self.frame_length)
+        if self.bounds:
+            cd.tag_files(self.rows, self.bounds)
         sync_len, block_len, frame_len = cd.layout(interleave, self.frame_length)
         self.cadu_len = sync_len + block_len
         self._step("packets")
@@ -498,7 +542,7 @@ class CaduWindow:
             else:
                 clcw = ("–", "–", "–", "–")
             self.tree.insert("", tk.END, iid=str(r["n"]), values=(
-                r["n"], r["offset"], r["scid"], r["vcid"], r["mc_count"], r["vc_count"],
+                r["n"], r.get("file", ""), r.get("file_offset", r["offset"]), r["scid"], r["vcid"], r["mc_count"], r["vc_count"],
                 cd.first_header_pointer_text(r["first_header_pointer"]), r["segment_length_id"], r["ocf_flag"],
                 *clcw, cd.rs_text(r)))
             shown += 1
@@ -614,7 +658,7 @@ def main() -> None:
                              f"{status.message}\n\nContact the supplier for a new licence file.", parent=root)
         root.destroy()
         raise SystemExit(1)
-    CaduWindow(root, sys.argv[1] if len(sys.argv) > 1 else None, license_status=status)
+    CaduWindow(root, sys.argv[1:] or None, license_status=status)  # files dropped on the icon
     root.deiconify()
     root.update_idletasks()
     _close_splash()

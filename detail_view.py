@@ -68,7 +68,9 @@ class DetailView(Page):
         head.pack(fill=tk.X, padx=16, pady=(14, 0))
         tk.Label(head, text=f"{'Transfer frame' if frame_length else 'CADU'} #{number}", bg=BG, fg=TEXT,
                  font=self.f_value).pack(side=tk.LEFT)
-        tk.Label(head, text=f"   byte {row['offset']:,} of the file   ·   VC {fields['vcid']}   ·   "
+        where = (f"byte {row['file_offset']:,} of {row['file']}" if "file" in row
+                 else f"byte {row['offset']:,} of the file")
+        tk.Label(head, text=f"   {where}   ·   VC {fields['vcid']}   ·   "
                  f"MC count {fields['mc_count']}   ·   VC count {fields['vc_count']}   ·   "
                  f"{cd.first_header_pointer_text(fields['first_header_pointer'])} (FHP)",
                  bg=BG, fg=MUTED, font=self.f_small).pack(side=tk.LEFT, pady=(8, 0))
