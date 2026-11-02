@@ -416,15 +416,19 @@ def reed_solomon_lines(rows, max_listed: int = 50, list_bad: bool = True) -> lis
     return lines
 
 
-def virtual_channel_table(good) -> list[tuple]:
-    """Rows (headings first) of the virtual channel table of the frames ``good`` (without the uncorrectable ones)."""
-    table = [("VC", "frames", "share", "idle", "packet start", "no header", "VCFC first", "VCFC last", "jumps",
+def virtual_channel_table(good, unit_len: int = 0) -> list[tuple]:
+    """Rows (headings first) of the virtual channel table of the frames ``good`` (without the uncorrectable ones).
+
+    ``unit_len``: bytes of one CADU (or transfer frame) in the file; MB is the size of the VC in the file
+    (frames x unit_len, 1 MB = 10^6 bytes)."""
+    table = [("VC", "frames", "share", "MB", "idle", "packet start", "no header", "VCFC first", "VCFC last", "jumps",
               "missing", "RS corrected")]
     for vc in sorted({r["vcid"] for r in good}):
         frames = [r for r in good if r["vcid"] == vc]
         vc_jumps, vc_missing = _counter_gaps([r["vc_count"] for r in frames])
         fhp = Counter(r["first_header_pointer"] for r in frames)
-        table.append((vc, len(frames), f"{100 * len(frames) / len(good):.1f} %", fhp[0x7FE],
+        table.append((vc, len(frames), f"{100 * len(frames) / len(good):.1f} %",
+                      f"{len(frames) * unit_len / 1e6:.2f}" if unit_len else "–", fhp[0x7FE],
                       len(frames) - fhp[0x7FE] - fhp[0x7FF], fhp[0x7FF], frames[0]["vc_count"],
                       frames[-1]["vc_count"], vc_jumps, vc_missing,
                       sum(1 for r in frames if r.get("rs") == "corrected") if "rs" in frames[0] else "–"))
@@ -760,9 +764,9 @@ def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50, all_rows=N
         lines.append("")
         lines.append("Virtual channels" + (" (uncorrectable frames not counted: their header is unreliable):"
                                            if len(good) < len(rows) else ":"))
-        lines += ["  " + line for line in _table(virtual_channel_table(good))]
-        lines.append("  idle: FHP 7FE (idle data only); packet start: a packet header in the frame; "
-                     "no header: FHP 7FF")
+        lines += ["  " + line for line in _table(virtual_channel_table(good, cadu_len))]
+        lines.append(f"  MB: size in the file ({unit.lower()} of {cadu_len} bytes, 1 MB = 10^6 bytes); "
+                     "idle: FHP 7FE (idle data only); packet start: a packet header in the frame; no header: FHP 7FF")
 
     with_ocf = [r for r in rows if r["ocf_flag"]]
     lines.append("")
