@@ -408,7 +408,8 @@ class CaduWindow:
 
     def _options_key(self) -> tuple:
         return (self.input_var.get(), self.length_var.get(), int(self.interleave_var.get()),
-                self.randomized_var.get(), self.fecf_var.get(), self.rs_var.get())
+                self.randomized_var.get(), self.fecf_var.get(), self.rs_var.get(), self.exclude_var.get(),
+                self.check_var.get())
 
     def _tab_changed(self) -> None:
         """Files and Text report tabs: with several files, the overview of all of them is computed when needed."""
@@ -430,7 +431,9 @@ class CaduWindow:
                     self.path = path
                     self._step("overview", k, len(self.files))
                     items.append(cd.file_overview(path, data, int(self.interleave_var.get()), kind, length,
-                                                  randomization, self.fecf_var.get(), reed_solomon=self.rs_var.get()))
+                                                  randomization, self.fecf_var.get(), reed_solomon=self.rs_var.get(),
+                                                  report=True, checked_apids=getattr(self, "_checked", None),
+                                                  exclude_bad=self.exclude_var.get(), max_listed=10 ** 9))
             finally:
                 self.path = shown
                 self._busy(False)
@@ -585,15 +588,22 @@ class CaduWindow:
         self.summary_view.canvas.yview_moveto(top)  # keep the page where it was
 
     def _fill_report(self) -> None:
-        """Text report: with several files the overview of all of them, then the full summary of the file
-        shown (every frame and gap listed, not only the first 50)."""
+        """Text report (every frame and gap listed, not only the first 50). With several files: the overview
+        of all of them, then the full report of each file, in the same order; with the files concatenated,
+        the report of the whole stream at the end."""
         lines = []
         if len(self.files) > 1:
             if self.overview is not None and self._overview_key == self._options_key():
-                lines += cd.overview_lines(self.overview)
+                lines += cd.overview_lines(self.overview) + cd.overview_reports(self.overview)
             else:
-                lines.append(f"Overview of the {len(self.files)} files: computed when the Files or Text report tab is opened.")
-            lines += ["", "=" * 100, f"{self.path if self.bounds else os.path.basename(self.path)}:", ""]
+                lines.append(f"Overview of the {len(self.files)} files: computed when the Files or Text report tab "
+                             "is opened.")
+                if self.tabs.select() in (str(self.files_tab), str(self.report_tab)):
+                    self.root.after_idle(self.fill_overview)  # options changed while looking at it
+            if not self.bounds:
+                self._set_text(self.summary_text, lines)
+                return
+            lines += ["", "=" * 100, f"{self.path} (one stream)", "=" * 100]
         if self.rows:
             lines += cd.summary(self._analysed(), len(self.data), self.cadu_len, max_listed=10 ** 9,
                                 all_rows=self.rows, packets=self.packets,

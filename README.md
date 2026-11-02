@@ -70,10 +70,14 @@ MB senza gli idle). Le righe sono in ordine di inizio del passaggio. Nel nome
 secondo e il terzo sono il passaggio (14:56:25 → 15:07:32), `AWS1` il satellite e `SVA` la stazione; con due tempi
 sono il passaggio, con uno l'inizio.
 
-    python cadu_decode.py AWS1_*.bin --overview
+    python cadu_decode.py AWS1_*.bin --overview      # tabella, poi il riepilogo di ogni file
 
 Nella finestra, con più file aperti, la stessa tabella è nella scheda **Files** (calcolata quando la si apre, con
-le opzioni della barra); doppio clic su una riga apre quel file. La scheda **Text report** comincia con la stessa tabella e prosegue con il riepilogo completo del file scelto in **File**: nella finestra gli elenchi (frame con una CLCW diversa, CADU non correggibili, salti dei contatori) sono interi, non solo i primi 50.
+le opzioni della barra); doppio clic su una riga apre quel file. La scheda **Text report** comincia con la stessa
+tabella e prosegue con il report completo di **ogni file**, uno dopo l'altro nello stesso ordine, ciascuno con il
+suo titolo (file, passaggio, stazione); con *All files, concatenated* in fondo c'è anche il report del flusso
+unico. Nella finestra gli elenchi (frame con una CLCW diversa, CADU non correggibili, salti dei contatori) sono
+interi, non solo i primi 50.
 
 ## Reed-Solomon e FER
 
