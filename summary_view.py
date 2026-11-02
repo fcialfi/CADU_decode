@@ -239,8 +239,8 @@ class SummaryView(Page):
                 tk.Label(card, text=str(value), bg=CARD, fg=TEXT, font=self.f_title).grid(
                     row=2, column=k, sticky="w", padx=12, pady=(0, 10))
             if odd:
-                self._section(f"CADUs with a different CLCW ({len(odd)})",
-                              "changes while commanding, or frames with errors; double click: open the CADU")
+                self._section(f"Frames with a different CLCW ({len(odd)})",
+                              "changes while commanding, or frames with errors; double click: open the frame")
                 self._table((("CADU #", 80), ("Offset", 100), ("VC", 50), ("MCFC", 60), ("RS", 80),
                              ("Different fields (most frequent → this frame)", 400)),
                             [(r["n"], r["offset"], r["vcid"], r["mc_count"], cd.rs_text(r),
@@ -312,9 +312,9 @@ class SummaryView(Page):
         gaps = [g for g in stats["gaps"] if g["apid"] in checked]
         if gaps:
             self._section(f"Sequence count gaps with no frame lost, APIDs checked ({len(gaps)})",
-                          "packets that never reached this VC; double click: open the CADU after the gap")
+                          "packets that never reached this VC; double click: open the frame after the gap")
             self._table((("APID", 60), ("VC", 50), ("Count before", 100), ("Count after", 100), ("Missing", 70),
-                         ("CADU before", 100), ("CADU after", 100), ("Missing counts found in", 180)),
+                         ("Frame before", 100), ("Frame after", 100), ("Missing counts found in", 180)),
                         [(g["apid"], g["vc"], g["before"], g["after"], g["missing"], g["frame_before"], g["frame"],
                           ", ".join(f"VC {v}" for v in g["found_in"]) or "–") for g in gaps],
                         goto_column=6, anchors={7: "w"})

@@ -139,7 +139,7 @@ class CaduWindow:
         root.bind_all("<F1>", lambda _e: self.show_about())
         root.protocol("WM_DELETE_WINDOW", self.exit_app)
         self.file_var = tk.StringVar(value="No file: press Open… (CADUs starting with the sync marker 1ACFFC1D, "
-                                           "or transfer frames)")
+                                           "or bare transfer frames)")
         status = ttk.Frame(root, padding=(10, 0))
         status.pack(fill=tk.X)
         ttk.Label(status, textvariable=self.file_var).pack(side=tk.LEFT)
@@ -255,7 +255,7 @@ class CaduWindow:
         titles.pack(side=tk.LEFT, padx=(16, 0))
         tk.Label(titles, text=APP_NAME, bg=HEADER_BG, fg=HEADER_FG,
                  font=(family, 15, "bold")).pack(anchor="w")
-        tk.Label(titles, text=f"Version {APP_VERSION}  ·  CCSDS TM CADUs and transfer frames: frames, Reed-Solomon, packets",
+        tk.Label(titles, text=f"Version {APP_VERSION}  ·  CADUs and transfer frames: headers, CLCW, Reed-Solomon, packets",
                  bg=HEADER_BG, fg=HEADER_FG_MUTED, font=(family, 9)).pack(anchor="w")
         for text, command in (("Exit", self.exit_app), ("About", self.show_about)):
             tk.Button(header, text=text, command=command, bg=HEADER_HOVER, fg=HEADER_FG,
@@ -269,7 +269,7 @@ class CaduWindow:
 
     def show_about(self) -> None:
         """Version, author and licence of the program (About button and F1)."""
-        lines = [f"{APP_NAME} {APP_VERSION}", "Decoder of CCSDS TM CADUs and transfer frames: frames, Reed-Solomon, packets",
+        lines = [f"{APP_NAME} {APP_VERSION}", "Decoder of CCSDS TM CADUs and transfer frames: headers, CLCW, Reed-Solomon, packets",
                  "", f"Author: {APP_AUTHOR}", "Copyright © 2026 Fabio Cialfi (Exostaff). All rights reserved."]
         license_text = self.license_status.summary()
         if license_text:
@@ -513,7 +513,7 @@ class CaduWindow:
         try:
             number = cd.parse_selection(text, len(self.rows))[0]
         except (ValueError, IndexError):
-            messagebox.showerror("Go to", f"Enter a CADU number from 1 to {len(self.rows)}.")
+            messagebox.showerror("Go to", f"Enter a frame number from 1 to {len(self.rows)}.")
             return
         if not self.tree.exists(str(number)):  # hidden by the filters
             self.vc_var.set(ALL)

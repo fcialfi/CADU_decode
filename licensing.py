@@ -26,6 +26,8 @@ import os
 import sys
 from typing import Optional
 
+# Product name signed into every licence: kept from the program's first name (CADU Decoder) so that
+# the licences already issued stay valid after the rename to CCSDS TM Decoder.
 PRODUCT = "CADU Decoder"
 LICENSE_FILENAME = "license.key"
 PUBLIC_KEY_FILENAME = "license_public_key.pem"
@@ -136,7 +138,7 @@ def default_public_key_path() -> str:
 def default_state_path() -> str:
     """Per-user file remembering the latest date seen (clock rollback check)."""
     root = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".local", "share")
-    return os.path.join(root, "CADU-Decoder", "license_state.json")
+    return os.path.join(root, "CADU-Decoder", "license_state.json")  # first name of the program, kept
 
 
 # --------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec of the CADU Decoder window: the folder dist/CADU-Decoder/ with CADU-Decoder.exe, no console.
+# PyInstaller spec of the CCSDS TM Decoder window: the folder dist/CCSDS-TM-Decoder/ with CCSDS-TM-Decoder.exe, no console.
 #
 #     pyinstaller cadu_gui.spec      (or build.bat on Windows)
 
@@ -26,12 +26,12 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-# Build mode. ONEFILE = False (default) builds a folder, dist/CADU-Decoder/, with CADU-Decoder.exe next to its
+# Build mode. ONEFILE = False (default) builds a folder, dist/CCSDS-TM-Decoder/, with CCSDS-TM-Decoder.exe next to its
 # libraries (in _internal/): it starts quickly because nothing has to be unpacked, and is distributed as a zip
 # of the whole folder. ONEFILE = True builds a single .exe that unpacks numpy and the other libraries to a temp
 # folder at every start: slower, much slower with an antivirus scanning the files.
 ONEFILE = False
-NAME = 'CADU-Decoder'
+NAME = 'CCSDS-TM-Decoder'
 
 # Splash screen, shown by the bootloader as soon as the .exe is started, before any Python code can run (in
 # one-file mode, while the bundle is being unpacked). cadu_gui.py closes it when the window is up.

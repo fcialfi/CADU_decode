@@ -1,15 +1,15 @@
 @echo off
-rem Build the CADU Decoder (the window of cadu_gui.py) with PyInstaller.
+rem Build the CCSDS TM Decoder (the window of cadu_gui.py) with PyInstaller.
 rem
 rem Double-click this file (or run it from a command prompt) in the project
 rem folder. It:
 rem   1. creates the .venv the first time and installs numpy, cryptography and
 rem      PyInstaller into it (later runs only add what is missing);
 rem   2. deletes the old build and dist folders and builds the folder
-rem      dist\CADU-Decoder\ with CADU-Decoder.exe (Python not needed on the
+rem      dist\CCSDS-TM-Decoder\ with CCSDS-TM-Decoder.exe (Python not needed on the
 rem      target PC: copy the whole folder);
 rem   3. only with "build.bat zip": zips the folder as
-rem      dist\CADU-Decoder_<version>.zip (version from version.py), to deliver
+rem      dist\CCSDS-TM-Decoder_<version>.zip (version from version.py), to deliver
 rem      it. Without the argument no zip is made.
 rem
 rem The licence file (license.key) is per customer: send it with the exe, to
@@ -17,7 +17,7 @@ rem put in the same folder (see README, Licenza a scadenza dell'eseguibile).
 
 setlocal
 cd /d "%~dp0"
-set APP=CADU-Decoder
+set APP=CCSDS-TM-Decoder
 set PY=.venv\Scripts\python.exe
 
 if not exist %PY% (
