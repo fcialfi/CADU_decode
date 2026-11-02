@@ -252,6 +252,9 @@ def test_packets_rebuilt(tmp_path, capsys):
     assert cd.main([str(path), "--export-packets", str(out)]) == 0
     text = capsys.readouterr().out
     assert "Packets (rebuilt from the frames" in text and "missing counts found in" not in text  # 0, 100 only
+    vc1_line = next(l for l in text.splitlines() if l.startswith("   1 ") and "B (" in l).split()
+    assert vc1_line[5] == f"{sum(len(p) for p in stream) / 1e6:.2f}"   # MB of the packets of VC 1
+    assert vc1_line[6] == f"{sum(len(p) for p in stream[:-1]) / 1e6:.2f}"   # without the idle packet
     assert cd.main([str(path), "--check-apids", "35, 51"]) == 0
     text = capsys.readouterr().out
     assert "missing counts found in" in text and "APIDs 35, 51;" in text

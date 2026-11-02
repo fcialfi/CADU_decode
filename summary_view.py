@@ -259,15 +259,18 @@ class SummaryView(Page):
 
     def _packets(self, stats):
         """Packets per VC and per APID, and the sequence count gaps with no frame lost."""
-        self._section("Packets per virtual channel", "rebuilt from the frames; idle packets: APID 2047")
+        self._section("Packets per virtual channel", "rebuilt from the frames; idle packets: APID 2047; "
+                      "1 MB = 10^6 bytes")
         table = []
         for vc in sorted(stats["vcs"]):
             v = stats["vcs"][vc]
             share = v["idle_packet_bytes"] / v["packet_bytes"] if v["packet_bytes"] else 0
-            table.append((vc, f"{v['packets']:,}", f"{v['packet_bytes']:,}", f"{v['idle_packet_bytes']:,}",
+            table.append((vc, f"{v['packets']:,}", f"{v['packet_bytes']:,}", f"{v['packet_bytes'] / 1e6:.2f}",
+                          f"{(v['packet_bytes'] - v['idle_packet_bytes']) / 1e6:.2f}", f"{v['idle_packet_bytes']:,}",
                           f"{100 * share:.1f} %", v["cut"], v["resyncs"]))
-        self._table((("VC", 50), ("Packets", 90), ("Packet bytes", 110), ("Idle packet bytes", 130),
-                     ("Idle share", 80), ("Cut at lost frames", 130), ("Resyncs", 70)), table)
+        self._table((("VC", 50), ("Packets", 90), ("Packet bytes", 110), ("MB", 70), ("MB without idle", 120),
+                     ("Idle packet bytes", 130), ("Idle share", 80), ("Cut at lost frames", 130), ("Resyncs", 70)),
+                    table)
         tk.Label(self.page, text="Cut: packets lost where frames of the VC are missing (VC counter jump, "
                  "uncorrectable frame).  Resyncs: packet stream broken with no frame missing.", bg=BG, fg=MUTED,
                  font=self.f_small).pack(anchor="w", padx=16, pady=(4, 0))
