@@ -267,3 +267,61 @@ def test_sequence_count_going_back():
     data = b"".join(_frames_from_stream(stream, 1, 0, 0))
     (a,) = [a for a in cd.packet_statistics(data, cd.decode_all(data))["apids"] if a["apid"] == 46]
     assert (a["back_jumps"], a["gaps"], a["missing"], a["missing_lost_frames"]) == (1, 0, 0, 0)
+
+
+def _bare(cadus, interleave=5):
+    """The transfer frames of randomized CADUs, as a receiver saves them: no sync marker, de-randomized,
+    without the Reed-Solomon check symbols."""
+    prn = cd.pseudo_random_sequence(255 * interleave)
+    return [bytes(a ^ b for a, b in zip(c[4:4 + 223 * interleave], prn)) for c in cadus]
+
+
+def _idle_frame(mc, vc, length=1115):
+    # As in an AWS capture: 06 8E A6 08 1F FE 5A 5A ... (SCID 104, VC 7, no OCF, idle data only)
+    return bytes([0x06, 0x8E, mc % 256, vc % 256, 0x1F, 0xFE]) + b"\x5a" * (length - 6)
+
+
+def test_transfer_frames_input_detected():
+    cadus = _frames_from_stream([_packet(51, k, 123) for k in range(30)], 1, 0, 0)
+    assert cd.detect_input(b"".join(cadus)) == "cadu"
+    frames = b"".join(_bare(cadus))
+    assert cd.detect_input(frames) == "frames"
+    assert cd.detect_frame_length(frames) == 1115
+    assert cd.detect_frame_length(b"".join(_idle_frame(k, k, 1024) for k in range(20))) == 1024
+    assert cd.detect_frame_length(bytes(5000)) == 0   # no frames: not detected
+
+
+def test_transfer_frames_decoded_as_the_cadus():
+    stream = [_packet(51, k, 123) for k in range(30)] + [_packet(35, k, 77) for k in range(10)]
+    cadus = _frames_from_stream(stream, 1, 0, 0)
+    frames = b"".join(_bare(cadus))
+    rows = cd.decode_all(frames, randomized=False, frame_length=1115)
+    assert [r["offset"] for r in rows] == [k * 1115 for k in range(len(cadus))]
+    assert all("rs" not in r for r in rows)   # no Reed-Solomon code in transfer frames
+    ref_rows = cd.decode_all(b"".join(cadus))
+    keys = ("scid", "vcid", "mc_count", "vc_count", "first_header_pointer", "report_value")
+    assert [[r[k] for k in keys] for r in rows] == [[r[k] for k in keys] for r in ref_rows]
+    stats = cd.packet_statistics(frames, rows, randomized=False, frame_length=1115)
+    ref = cd.packet_statistics(b"".join(cadus), ref_rows)
+    assert stats["apids"] == ref["apids"] and stats["vcs"] == ref["vcs"]
+    assert not cd.detect_randomization(frames, frame_length=1115)
+
+
+def test_transfer_frames_cli(tmp_path, capsys):
+    path = tmp_path / "frames.bin"
+    path.write_bytes(b"".join(_idle_frame(0xA6 + k, 8 + k) for k in range(12)) + b"\x06\x8e")
+    assert cd.main([str(path)]) == 0
+    text = capsys.readouterr().out
+    assert "transfer frames of 1115 bytes (detected), no sync marker, no Reed-Solomon code" in text
+    assert "Transfer frames: 12 of 1115 bytes" in text and "2 bytes at the end of the file" in text
+    assert "Reed-Solomon: none" in text and "Spacecraft IDs: 104 (12 frames)" in text
+    assert cd.main([str(path), "--show", "2", "--no-dump"]) == 0
+    text = capsys.readouterr().out
+    assert "Transfer frame #2 at byte 1115" in text and "Sync marker" not in text
+    assert "idle data only" in text and "codewords" not in text
+    assert cd.main([str(path), "--frame-length", "1115", "--frames"]) == 0
+    assert "(option)" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        cd.main([str(path), "--input", "frames", "--exclude-bad"])
+    with pytest.raises(SystemExit):
+        cd.main([str(path), "--input", "cadu", "--frame-length", "1115"])
