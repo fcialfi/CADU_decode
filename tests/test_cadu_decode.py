@@ -364,3 +364,32 @@ def test_several_files_one_summary_each_or_concatenated(tmp_path, capsys):
     assert "CADU #4 at byte 837 of chunk_1.bin" in capsys.readouterr().out
     with pytest.raises(SystemExit):   # one CSV for several summaries: ambiguous
         cd.main([str(p) for p in paths] + ["-o", str(tmp_path / "x.csv")])
+
+
+def test_pass_from_name():
+    from datetime import datetime
+    p = cd.pass_from_name(r"C:\data\AWS1_H_1_20261028T150735_20261028T145625_20261028T150732_SVA.bin")
+    assert p == {"satellite": "AWS1", "station": "SVA", "start": datetime(2026, 10, 28, 14, 56, 25),
+                 "end": datetime(2026, 10, 28, 15, 7, 32)}
+    assert cd.pass_from_name("capture_20261028T145625_20261028T150732.bin")["end"].minute == 7
+    assert cd.pass_from_name("capture.bin") == {}
+
+
+def test_overview_one_row_per_file(tmp_path, capsys):
+    late = tmp_path / "AWS1_H_1_20261029T101000_20261029T095000_20261029T100500_KIR.bin"
+    early = tmp_path / "AWS1_H_1_20261028T150735_20261028T145625_20261028T150732_SVA.bin"
+    late.write_bytes(b"".join(_frames_from_stream([_packet(100, k, 300) for k in range(30)], 1, 0, 0)))
+    early.write_bytes(b"".join(_bare(_frames_from_stream([_packet(100, k, 300) for k in range(20)], 1, 0, 0))
+                               + [_idle_frame(k, k) for k in range(8, 12)]))
+    assert cd.main([str(late), str(early), "--overview"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    rows = [l for l in lines if "AWS1_H_1" in l]
+    assert "SVA" in rows[0] and "2026-10-28 14:56:25" in rows[0] and "15:07:32" in rows[0]   # by pass start
+    assert "11.1" in rows[0] and "TF 1115 B" in rows[0] and "1:6 7:4" in rows[0]   # minutes, input, VCs
+    assert "KIR" in rows[1] and "CADU 1279 B" in rows[1]
+    total = next(l for l in lines if "2 files" in l).split()
+    assert total[:2] == ["total", "19"]   # frames: 10 + 9 (6 + 4 + 9 CADUs)
+    o = cd.file_overview(str(late), late.read_bytes())
+    assert (o["frames"], o["uncorrectable"], o["vcs"]) == (9, 0, {1: 9}) and o["packets"] >= 30
+    with pytest.raises(SystemExit):
+        cd.main([str(late), str(early), "--overview", "--concat"])

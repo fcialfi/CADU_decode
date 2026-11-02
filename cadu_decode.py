@@ -36,9 +36,12 @@ Author: Fabio Cialfi (Exostaff). Proprietary software, see LICENSE.
 
 import argparse
 import csv
+import os
+import re
 import string
 import sys
 from collections import Counter
+from datetime import datetime
 
 import rs_ccsds
 from version import APP_AUTHOR, APP_NAME, APP_VERSION
@@ -172,6 +175,32 @@ def position_text(row: dict) -> str:
     if "file" in row:
         return f"byte {row['file_offset']} of {row['file']}"
     return f"byte {row['offset']} of the file"
+
+
+_STAMP = re.compile(r"(\d{8}T\d{6})")
+
+
+def pass_from_name(name: str) -> dict:
+    """Satellite, station and pass times read from a file name, e.g.
+    AWS1_H_1_20261028T150735_20261028T145625_20261028T150732_SVA.bin: satellite AWS1, file made at 15:07:35,
+    pass from 14:56:25 to 15:07:32, station SVA. With three times the 2nd and 3rd are the pass (the 1st is
+    when the file was made), with two they are the pass, one is the start. {} when the name has no time."""
+    stem = os.path.splitext(os.path.basename(name.replace("\\", "/")))[0]
+    times = []
+    for text in _STAMP.findall(stem):
+        try:
+            times.append(datetime.strptime(text, "%Y%m%dT%H%M%S"))
+        except ValueError:
+            pass
+    if not times:
+        return {}
+    start, end = (times[1], times[2]) if len(times) >= 3 else (times[0], times[1] if len(times) == 2 else None)
+    if end is not None and end < start:
+        end = None
+    parts = stem.split("_")
+    station = parts[-1] if len(parts) > 1 and parts[-1].isalpha() else ""
+    satellite = parts[0] if len(parts) > 1 and not _STAMP.fullmatch(parts[0]) else ""
+    return {"satellite": satellite, "station": station, "start": start, "end": end}
 
 
 def read_input(path: str) -> bytes:
@@ -1037,6 +1066,109 @@ def show_cadu(number: int, row: dict, data: bytes, interleave: int, randomized: 
     return lines
 
 
+def prepare(data: bytes, interleave: int = 5, input_kind: str = "auto", frame_length: int = 0,
+            randomization: str = "auto", fecf: bool = False) -> dict:
+    """How to read ``data``: frame_length (0: CADUs) and how it was found, randomized and how it was found.
+
+    ``input_kind`` auto / cadu / frames; ``frame_length`` > 0 sets the length of the transfer frames;
+    ``randomization`` auto / yes / no."""
+    kind = "frames" if frame_length else input_kind
+    if kind == "auto":
+        kind = detect_input(data, interleave)
+    length, length_how = 0, ""
+    if kind == "frames":
+        length, length_how = frame_length, "option"
+        if not length:
+            length, length_how = detect_frame_length(data), "detected"
+        if not length:
+            length, length_how = RS_K * interleave, f"not detected: 223 x I = {RS_K * interleave}"
+    if randomization == "no":
+        randomized, how = False, "not randomized (option)"
+    elif randomization == "yes":
+        randomized, how = True, "randomized (option)"
+    else:
+        randomized = detect_randomization(data, interleave, fecf, frame_length=length)
+        how = ("randomized" if randomized else "not randomized, already de-randomized") + " (detected)"
+    return {"frame_length": length, "length_how": length_how, "randomized": randomized, "randomized_how": how}
+
+
+def file_overview(name: str, data: bytes, interleave: int = 5, input_kind: str = "auto", frame_length: int = 0,
+                  randomization: str = "auto", fecf: bool = False, reed_solomon: bool = True,
+                  packets: bool = True) -> dict:
+    """The main numbers of one file, for the overview of several files (one row each)."""
+    how = prepare(data, interleave, input_kind, frame_length, randomization, fecf)
+    length = how["frame_length"]
+    rows = decode_all(data, interleave, how["randomized"], fecf, reed_solomon=reed_solomon, frame_length=length)
+    sync_len, block_len, frame_len = layout(interleave, length)
+    good = [r for r in rows if r.get("rs") != "uncorrectable"]
+    stats = packet_statistics(data, rows, interleave, how["randomized"], fecf, frame_length=length) if packets else None
+    vcs = Counter(r["vcid"] for r in good)
+    out = {
+        "file": os.path.basename(name), **pass_from_name(name), "bytes": len(data),
+        "input": f"TF {frame_len} B" if length else f"CADU {sync_len + block_len} B",
+        "frames": len(rows), "scids": sorted({r["scid"] for r in good}),
+        "vcs": dict(sorted(vcs.items())),
+        "vc_mb": {vc: n * (sync_len + block_len) / 1e6 for vc, n in sorted(vcs.items())},
+        "idle_frames": sum(1 for r in good if r["first_header_pointer"] == 0x7FE),
+        "mc_missing": _counter_gaps([r["mc_count"] for r in good])[1] if good else 0,
+        "rs": "rs" in rows[0] if rows else False,
+        "corrected": sum(1 for r in rows if r.get("rs") == "corrected"),
+        "uncorrectable": len(rows) - len(good),
+    }
+    if stats is not None:
+        vc_stats = stats["vcs"].values()
+        out["packets"] = sum(v["packets"] for v in vc_stats)
+        out["packet_mb"] = sum(v["packet_bytes"] - v["idle_packet_bytes"] for v in vc_stats) / 1e6
+    return out
+
+
+def _when(t) -> str:
+    return t.strftime("%Y-%m-%d %H:%M:%S") if t else ""
+
+
+def overview_table(items) -> list[tuple]:
+    """Rows (headings first, totals last) of the overview of several files, in order of pass start."""
+    items = sorted(items, key=lambda o: (o.get("start") is None, o.get("start") or datetime.min, o["file"]))
+    table = [("sat", "station", "pass start", "end", "min", "input", "frames", "VC: frames", "MB",
+              "idle frames", "MC missing", "RS corrected", "RS uncorrectable", "FER", "packets", "packet MB", "file")]
+    for o in items:
+        minutes = f"{(o['end'] - o['start']).total_seconds() / 60:.1f}" if o.get("end") else ""
+        fer = f"{o['uncorrectable'] / o['frames']:.2e}" if o["rs"] and o["frames"] else "–"
+        table.append((o.get("satellite", ""), o.get("station", ""), _when(o.get("start")),
+                      o["end"].strftime("%H:%M:%S") if o.get("end") else "", minutes, o["input"], o["frames"],
+                      " ".join(f"{vc}:{n}" for vc, n in o["vcs"].items()) or "–", f"{o['bytes'] / 1e6:.2f}",
+                      o["idle_frames"], o["mc_missing"], o["corrected"] if o["rs"] else "–",
+                      o["uncorrectable"] if o["rs"] else "–", fer, o.get("packets", "–"),
+                      f"{o['packet_mb']:.2f}" if "packet_mb" in o else "–", o["file"]))
+    if len(items) > 1:
+        frames = sum(o["frames"] for o in items)
+        checked = [o for o in items if o["rs"]]  # Reed-Solomon totals: the files of CADUs checked only
+        bad = sum(o["uncorrectable"] for o in checked)
+        rs_frames = sum(o["frames"] for o in checked)
+        rs = bool(checked)
+        vcs = Counter()
+        for o in items:
+            vcs.update(o["vcs"])
+        table.append(("total", "", "", "", "", "", frames,
+                      " ".join(f"{vc}:{n}" for vc, n in sorted(vcs.items())),
+                      f"{sum(o['bytes'] for o in items) / 1e6:.2f}", sum(o["idle_frames"] for o in items),
+                      sum(o["mc_missing"] for o in items), sum(o["corrected"] for o in checked) if rs else "–",
+                      bad if rs else "–", f"{bad / rs_frames:.2e}" if rs and rs_frames else "–",
+                      sum(o.get("packets", 0) for o in items) if all("packets" in o for o in items) else "–",
+                      f"{sum(o['packet_mb'] for o in items):.2f}" if all("packet_mb" in o for o in items) else "–",
+                      f"{len(items)} files"))
+    return table
+
+
+def overview_lines(items) -> list[str]:
+    lines = ["Overview by file (pass times from the file names; MB: size of the file; packet MB: packets "
+             "without the idle ones; 1 MB = 10^6 bytes):"]
+    lines += ["  " + line for line in _table(overview_table(items), left=3, last_left=True)]
+    if any(o["rs"] for o in items) and not all(o["rs"] for o in items):
+        lines.append("  Reed-Solomon totals: the files of CADUs only (transfer frames have no Reed-Solomon code)")
+    return lines
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("file", nargs="+", help="file of CADUs or of transfer frames (binary, or hexadecimal text); "
@@ -1044,6 +1176,9 @@ def main(argv=None) -> int:
     ap.add_argument("--concat", action="store_true",
                     help="read the files one after the other as one stream (chunks of one capture, in the order "
                          "given): one summary; every frame says which file it comes from")
+    ap.add_argument("--overview", action="store_true",
+                    help="several files: one table with a row per file (pass date and station from the file name, "
+                         "frames, VCs, MB, Reed-Solomon, packets) and the totals, instead of a summary per file")
     ap.add_argument("--version", action="version", version=f"{APP_NAME} {APP_VERSION} - author: {APP_AUTHOR}")
     ap.add_argument("--input", choices=("auto", "cadu", "frames"), default="auto",
                     help="what the file holds: cadu (sync marker 1ACFFC1D + codeblock), frames (bare transfer "
@@ -1098,9 +1233,19 @@ def main(argv=None) -> int:
     if len(args.file) > 1 and not args.concat and (args.output or args.export_packets):
         ap.error("-o and --export-packets with several files need --concat (one stream)")
 
+    if args.overview:
+        if args.concat or args.show or args.output or args.export_packets or args.frames is not None:
+            ap.error("--overview gives the table of the files only (no --concat, --show, --frames, -o, "
+                     "--export-packets)")
+        randomization = "no" if args.not_randomized else args.randomization
+        items = []
+        for name in args.file:
+            items.append(file_overview(name, read_input(name), args.interleave, args.input, args.frame_length,
+                                       randomization, args.fecf, reed_solomon=not args.no_rs,
+                                       packets=not args.no_packets))
+        print("\n".join(overview_lines(items)))
+        return 0
     if args.concat and len(args.file) > 1:
-        import os
-
         data, bounds = concatenate([(os.path.basename(f), read_input(f)) for f in args.file])
         return _analyse(args, ap, f"{len(args.file)} files concatenated ({', '.join(args.file)})", data,
                         checked_apids, bounds)
@@ -1114,25 +1259,11 @@ def main(argv=None) -> int:
 
 def _analyse(args, ap, name: str, data: bytes, checked_apids, bounds=None) -> int:
     """Summary (or --show, -o, --export-packets) of one file, or of files concatenated (``bounds``)."""
-    kind = "frames" if args.frame_length else args.input
-    if kind == "auto":
-        kind = detect_input(data, args.interleave)
-    frame_length, length_how = 0, ""
-    if kind == "frames":
-        if args.exclude_bad:
-            ap.error("--exclude-bad needs the Reed-Solomon code: transfer frames have none")
-        frame_length, length_how = args.frame_length, "option"
-        if not frame_length:
-            frame_length, length_how = detect_frame_length(data), "detected"
-        if not frame_length:
-            frame_length, length_how = RS_K * args.interleave, f"not detected: 223 x I = {RS_K * args.interleave}"
-    if args.not_randomized or args.randomization == "no":
-        randomized, how = False, "not randomized (option)"
-    elif args.randomization == "yes":
-        randomized, how = True, "randomized (option)"
-    else:
-        randomized = detect_randomization(data, args.interleave, args.fecf, frame_length=frame_length)
-        how = ("randomized" if randomized else "not randomized, already de-randomized") + " (detected)"
+    p = prepare(data, args.interleave, args.input, args.frame_length,
+                "no" if args.not_randomized else args.randomization, args.fecf)
+    frame_length, length_how, randomized, how = p["frame_length"], p["length_how"], p["randomized"], p["randomized_how"]
+    if frame_length and args.exclude_bad:
+        ap.error("--exclude-bad needs the Reed-Solomon code: transfer frames have none")
     if args.show:  # one CADU: no need to check the whole file
         rows = decode_all(data, args.interleave, randomized, args.fecf, reed_solomon=False, frame_length=frame_length)
     else:
