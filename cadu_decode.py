@@ -644,14 +644,16 @@ def packet_lines(stats: dict, max_listed: int = 50, checked=None) -> list[str]:
     """
     checked = parse_apids(DEFAULT_CHECKED_APIDS) if checked is None else set(checked)
     lines = ["Packets (rebuilt from the frames; uncorrectable frames left out):"]
-    table = [("VC", "frames", "idle frames", "packets", "packet bytes", "idle packets", "cut", "resyncs")]
+    table = [("VC", "frames", "idle frames", "packets", "packet bytes", "MB", "MB without idle", "idle packets",
+              "cut", "resyncs")]
     for vc in sorted(stats["vcs"]):
         v = stats["vcs"][vc]
         share = v["idle_packet_bytes"] / v["packet_bytes"] if v["packet_bytes"] else 0
         table.append((vc, v["frames"], v["idle_frames"], v["packets"], v["packet_bytes"],
+                      f"{v['packet_bytes'] / 1e6:.2f}", f"{(v['packet_bytes'] - v['idle_packet_bytes']) / 1e6:.2f}",
                       f"{v['idle_packet_bytes']} B ({100 * share:.1f} %)", v["cut"], v["resyncs"]))
     lines += ["  " + line for line in _table(table)]
-    lines.append("  idle packets: APID 2047; cut: packets lost where frames of the VC are missing; "
+    lines.append("  idle packets: APID 2047; MB: 10^6 bytes; cut: packets lost where frames of the VC are missing; "
                  "resyncs: packet stream broken with no frame missing")
     lines.append("")
     table = [("APID", "VC", "packets", "bytes", "length", "seq first", "seq last", "gaps", "missing",
