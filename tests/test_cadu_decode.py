@@ -387,6 +387,12 @@ def test_overview_one_row_per_file(tmp_path, capsys):
     assert "SVA" in rows[0] and "2026-10-28 14:56:25" in rows[0] and "15:07:32" in rows[0]   # by pass start
     assert "11.1" in rows[0] and "TF 1115 B" in rows[0] and "1:6 7:4" in rows[0]   # minutes, input, VCs
     assert "KIR" in rows[1] and "CADU 1279 B" in rows[1]
+    # then the full summary of each file, in the same order
+    titles = [k for k, l in enumerate(lines) if l.startswith("AWS1_H_1_")]
+    assert len(titles) == 2 and "SVA" in lines[titles[0]] and "pass 2026-10-28 14:56:25 → 15:07:32" in lines[titles[0]]
+    first = "\n".join(lines[titles[0]:titles[1]])
+    assert "Transfer frames: 10 of 1115 bytes" in first and "Packets (rebuilt" in first
+    assert "CADUs: 9 of 1279 bytes" in "\n".join(lines[titles[1]:])
     total = next(l for l in lines if "2 files" in l).split()
     assert total[:2] == ["total", "19"]   # frames: 10 + 9 (6 + 4 + 9 CADUs)
     o = cd.file_overview(str(late), late.read_bytes())

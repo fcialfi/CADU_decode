@@ -1094,8 +1094,11 @@ def prepare(data: bytes, interleave: int = 5, input_kind: str = "auto", frame_le
 
 def file_overview(name: str, data: bytes, interleave: int = 5, input_kind: str = "auto", frame_length: int = 0,
                   randomization: str = "auto", fecf: bool = False, reed_solomon: bool = True,
-                  packets: bool = True) -> dict:
-    """The main numbers of one file, for the overview of several files (one row each)."""
+                  packets: bool = True, report: bool = False, checked_apids=None, exclude_bad: bool = False,
+                  max_listed: int = 50) -> dict:
+    """The main numbers of one file, for the overview of several files (one row each).
+
+    With ``report`` also "report": the lines of its full summary (as for the file alone)."""
     how = prepare(data, interleave, input_kind, frame_length, randomization, fecf)
     length = how["frame_length"]
     rows = decode_all(data, interleave, how["randomized"], fecf, reed_solomon=reed_solomon, frame_length=length)
@@ -1119,7 +1122,37 @@ def file_overview(name: str, data: bytes, interleave: int = 5, input_kind: str =
         vc_stats = stats["vcs"].values()
         out["packets"] = sum(v["packets"] for v in vc_stats)
         out["packet_mb"] = sum(v["packet_bytes"] - v["idle_packet_bytes"] for v in vc_stats) / 1e6
+    if report:
+        if length:
+            line = (f"{len(data)} bytes; transfer frames of {frame_len} bytes ({how['length_how']}), no sync marker, "
+                    f"no Reed-Solomon code; frames {how['randomized_how']}")
+        else:
+            line = (f"{len(data)} bytes; CADU {sync_len + block_len} bytes, transfer frame {frame_len} bytes "
+                    f"(I = {interleave}); codeblocks {how['randomized_how']}")
+        analysed = good if exclude_bad else rows
+        out["report"] = [line] + (summary(analysed, len(data), sync_len + block_len, max_listed, all_rows=rows,
+                                          packets=stats, checked_apids=checked_apids,
+                                          unit="Transfer frames" if length else "CADUs")
+                                  if rows else ["The file is shorter than one transfer frame." if length
+                                                else "No sync marker 1ACFFC1D found."])
     return out
+
+
+def overview_reports(items) -> list[str]:
+    """The full summary of each file (file_overview with ``report``), in the order of the overview table."""
+    lines = []
+    for o in _by_pass(items):
+        title = o["file"]
+        if o.get("start"):
+            title += (f"  —  {o.get('satellite') or ''} pass {_when(o['start'])}"
+                      + (f" → {o['end']:%H:%M:%S}" if o.get("end") else "")
+                      + (f", station {o['station']}" if o.get("station") else ""))
+        lines += ["", "=" * 100, title, "=" * 100] + o.get("report", [])
+    return lines
+
+
+def _by_pass(items):
+    return sorted(items, key=lambda o: (o.get("start") is None, o.get("start") or datetime.min, o["file"]))
 
 
 def _when(t) -> str:
@@ -1128,7 +1161,7 @@ def _when(t) -> str:
 
 def overview_table(items) -> list[tuple]:
     """Rows (headings first, totals last) of the overview of several files, in order of pass start."""
-    items = sorted(items, key=lambda o: (o.get("start") is None, o.get("start") or datetime.min, o["file"]))
+    items = _by_pass(items)
     table = [("sat", "station", "pass start", "end", "min", "input", "frames", "VC: frames", "MB",
               "idle frames", "MC missing", "RS corrected", "RS uncorrectable", "FER", "packets", "packet MB", "file")]
     for o in items:
@@ -1177,8 +1210,9 @@ def main(argv=None) -> int:
                     help="read the files one after the other as one stream (chunks of one capture, in the order "
                          "given): one summary; every frame says which file it comes from")
     ap.add_argument("--overview", action="store_true",
-                    help="several files: one table with a row per file (pass date and station from the file name, "
-                         "frames, VCs, MB, Reed-Solomon, packets) and the totals, instead of a summary per file")
+                    help="several files: first a table with a row per file (pass date and station from the file "
+                         "name, frames, VCs, MB, Reed-Solomon, packets) and the totals, then the summary of each "
+                         "file in the same order")
     ap.add_argument("--version", action="version", version=f"{APP_NAME} {APP_VERSION} - author: {APP_AUTHOR}")
     ap.add_argument("--input", choices=("auto", "cadu", "frames"), default="auto",
                     help="what the file holds: cadu (sync marker 1ACFFC1D + codeblock), frames (bare transfer "
@@ -1235,15 +1269,16 @@ def main(argv=None) -> int:
 
     if args.overview:
         if args.concat or args.show or args.output or args.export_packets or args.frames is not None:
-            ap.error("--overview gives the table of the files only (no --concat, --show, --frames, -o, "
-                     "--export-packets)")
+            ap.error("--overview gives the table and the summary of each file only (no --concat, --show, --frames, "
+                     "-o, --export-packets)")
         randomization = "no" if args.not_randomized else args.randomization
         items = []
         for name in args.file:
             items.append(file_overview(name, read_input(name), args.interleave, args.input, args.frame_length,
                                        randomization, args.fecf, reed_solomon=not args.no_rs,
-                                       packets=not args.no_packets))
-        print("\n".join(overview_lines(items)))
+                                       packets=not args.no_packets, report=True, checked_apids=checked_apids,
+                                       exclude_bad=args.exclude_bad))
+        print("\n".join(overview_lines(items) + overview_reports(items)))
         return 0
     if args.concat and len(args.file) > 1:
         data, bounds = concatenate([(os.path.basename(f), read_input(f)) for f in args.file])
