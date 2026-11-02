@@ -73,7 +73,7 @@ sono il passaggio, con uno l'inizio.
     python cadu_decode.py AWS1_*.bin --overview
 
 Nella finestra, con più file aperti, la stessa tabella è nella scheda **Files** (calcolata quando la si apre, con
-le opzioni della barra); doppio clic su una riga apre quel file.
+le opzioni della barra); doppio clic su una riga apre quel file. La scheda **Text report** comincia con la stessa tabella e prosegue con il riepilogo completo del file scelto in **File**: nella finestra gli elenchi (frame con una CLCW diversa, CADU non correggibili, salti dei contatori) sono interi, non solo i primi 50.
 
 ## Reed-Solomon e FER
 
