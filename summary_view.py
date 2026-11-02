@@ -136,7 +136,7 @@ class SummaryView(Page):
         self.on_check = on_check
         self._message("Open a file of CADUs to see its summary.")
 
-    def update_view(self, rows, all_rows, data_len, cadu_len, packets=None):
+    def update_view(self, rows, all_rows, data_len, cadu_len, packets=None, unit="CADUs"):
         """Fill the page: ``rows`` analysed, ``all_rows`` every CADU of the file, ``packets`` the packet
         statistics (cadu_decode.packet_statistics)."""
         if not all_rows:
@@ -152,7 +152,7 @@ class SummaryView(Page):
         # Tiles.
         tiles = tk.Frame(self.page, bg=BG)
         tiles.pack(fill=tk.X, padx=16, pady=(16, 0))
-        self._tile(tiles, "CADUs", f"{n:,}", f"{cadu_len} bytes each", TEXT)
+        self._tile(tiles, unit, f"{n:,}", f"{cadu_len} bytes each", TEXT)
         if checked:
             fer = len(bad) / n
             self._tile(tiles, "Error-free frames", f"{100 * status['ok'] / n:.2f} %", f"{status['ok']:,} frames\n"
@@ -165,6 +165,8 @@ class SummaryView(Page):
                        f"beyond the Reed-Solomon code\n{100 * fer:.3f} % of the frames", BAD if bad else GOOD)
             self._tile(tiles, "Frame error rate", _fmt_rate(fer), f"uncorrectable / CADUs\n"
                        f"{len(bad)} / {n}", BAD if bad else GOOD)
+        elif unit != "CADUs":
+            self._tile(tiles, "Reed-Solomon", "none", "transfer frames carry\nno check symbols", MUTED)
         else:
             self._tile(tiles, "Reed-Solomon", "not checked", "enable the Reed-Solomon check", MUTED)
         # Header fields read from the good frames only: an uncorrectable frame may have a corrupted header.

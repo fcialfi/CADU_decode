@@ -45,6 +45,19 @@ from version import APP_AUTHOR, APP_NAME, APP_VERSION
 
 ASM = bytes.fromhex("1ACFFC1D")
 RS_N, RS_K = 255, 223
+MAX_FRAME_LEN = 2048  # longest TM transfer frame (CCSDS 132.0-B)
+
+
+def layout(interleave: int = 5, frame_length: int = 0) -> tuple[int, int, int]:
+    """(sync marker bytes, block bytes, transfer frame bytes) of one unit of the file.
+
+    ``frame_length`` 0: CADUs, sync marker + codeblock (frame and Reed-Solomon check symbols).
+    Otherwise a file of bare transfer frames of that length, one after the other: no sync marker
+    and no Reed-Solomon code; the block is the frame itself.
+    """
+    if frame_length:
+        return 0, frame_length, frame_length
+    return len(ASM), RS_N * interleave, RS_K * interleave
 
 
 def pseudo_random_sequence(length: int) -> bytes:
@@ -105,7 +118,8 @@ def clcw(word: bytes) -> dict:
     }
 
 
-def detect_randomization(data: bytes, interleave: int = 5, fecf: bool = False, sample: int = 200) -> bool:
+def detect_randomization(data: bytes, interleave: int = 5, fecf: bool = False, sample: int = 200,
+                         frame_length: int = 0) -> bool:
     """Whether the codeblocks of ``data`` are randomized, judged on the first ``sample`` CADUs.
 
     Both readings are scored: frames with version 0, and master channel counters going up by 1 from a
@@ -115,7 +129,7 @@ def detect_randomization(data: bytes, interleave: int = 5, fecf: bool = False, s
     """
     def score(randomized):
         rows = []
-        for _offset, fields in decode(data, interleave, randomized, fecf):
+        for _offset, fields in decode(data, interleave, randomized, fecf, frame_length):
             rows.append(fields)
             if len(rows) >= sample:
                 break
@@ -143,15 +157,17 @@ def read_input(path: str) -> bytes:
     return data
 
 
-def decode(data: bytes, interleave: int = 5, randomized: bool = True, fecf: bool = False):
-    """Yield (offset, fields) for every CADU in ``data``, synchronised on the sync marker."""
-    codeblock_len = RS_N * interleave
-    frame_len = RS_K * interleave
-    cadu_len = len(ASM) + codeblock_len
+def decode(data: bytes, interleave: int = 5, randomized: bool = True, fecf: bool = False, frame_length: int = 0):
+    """Yield (offset, fields) for every CADU in ``data``, synchronised on the sync marker.
+
+    With ``frame_length`` the file holds bare transfer frames of that length, one after the other
+    from the start of the file (see ``layout``)."""
+    sync_len, codeblock_len, frame_len = layout(interleave, frame_length)
+    cadu_len = sync_len + codeblock_len
     prn = pseudo_random_sequence(codeblock_len) if randomized else None
-    pos = data.find(ASM)
+    pos = 0 if frame_length else data.find(ASM)
     while pos >= 0 and pos + cadu_len <= len(data):
-        base = pos + len(ASM)
+        base = pos + sync_len
 
         def read(start, end):
             # Only the bytes read are de-randomized: fast on files of many CADUs.
@@ -167,7 +183,57 @@ def decode(data: bytes, interleave: int = 5, randomized: bool = True, fecf: bool
         yield pos, fields
         # The next CADU normally starts right after; otherwise search the next sync marker.
         nxt = pos + cadu_len
-        pos = nxt if data[nxt:nxt + len(ASM)] == ASM else data.find(ASM, nxt)
+        if frame_length:
+            pos = nxt
+        else:
+            pos = nxt if data[nxt:nxt + len(ASM)] == ASM else data.find(ASM, nxt)
+
+
+def detect_input(data: bytes, interleave: int = 5) -> str:
+    """"cadu" when the file holds sync markers 1ACFFC1D one CADU apart, otherwise "frames"."""
+    cadu_len = len(ASM) + RS_N * interleave
+    pos = data.find(ASM, 0, 1 << 20)
+    while pos >= 0:
+        if data[pos + cadu_len:pos + cadu_len + len(ASM)] == ASM:
+            return "cadu"
+        pos = data.find(ASM, pos + 1, 1 << 20)
+    # Another interleaving depth: still sync markers at a fixed distance
+    marks = []
+    pos = data.find(ASM, 0, 1 << 20)
+    while pos >= 0 and len(marks) < 3:
+        marks.append(pos)
+        pos = data.find(ASM, pos + 1, 1 << 20)
+    if len(marks) == 3 and marks[1] - marks[0] == marks[2] - marks[1]:
+        return "cadu"
+    return "frames"
+
+
+def detect_frame_length(data: bytes, sample: int = 50) -> int:
+    """Length of the transfer frames of a file of bare frames, or 0 when not found.
+
+    Every length up to 2048 bytes is tried: the frames must keep version 0 and the spacecraft ID of the
+    first one, with master channel counters going up by 1 (also read de-randomized, for randomized
+    frames). The shortest length with the best score wins.
+    """
+    prn = pseudo_random_sequence(6)
+    best, best_score = 0, 0
+    for length in range(8, MAX_FRAME_LEN + 1):
+        frames = min(sample, len(data) // length)
+        if frames < 3:
+            break
+        for key in (None, prn):
+            heads = [data[k * length:k * length + 6] for k in range(frames)]
+            if key is not None:
+                heads = [_xor(h, key) for h in heads]
+            fields = [primary_header(h) for h in heads]
+            if fields[0]["version"]:
+                continue
+            same = sum(1 for f in fields if f["version"] == 0 and f["scid"] == fields[0]["scid"])
+            consecutive = sum(1 for a, b in zip(fields, fields[1:]) if (b["mc_count"] - a["mc_count"]) % 256 == 1)
+            score = (same + consecutive) / (2 * frames - 1)
+            if score > best_score + 1e-9:
+                best, best_score = length, score
+    return best if best_score >= 0.8 else 0
 
 
 def parse_frame(frame: bytes, fecf: bool = False) -> dict:
@@ -220,22 +286,24 @@ def check_reed_solomon(data: bytes, offsets, interleave: int = 5, randomized: bo
 
 
 def decode_all(data: bytes, interleave: int = 5, randomized: bool = True, fecf: bool = False,
-               reed_solomon: bool = True, progress=None) -> list[dict]:
+               reed_solomon: bool = True, progress=None, frame_length: int = 0) -> list[dict]:
     """Every CADU as a dict: number n (from 1), offset, frame fields and, with ``reed_solomon``, rs
     ("ok", "corrected" or "uncorrectable"), rs_corrected (symbols corrected) and rs_failed (codewords
     not correctable). The fields of a corrected frame are read from the corrected bytes.
 
     ``progress(stage, done, total)`` is called now and then: stage "frames" (bytes read of the
     file), then "reed-solomon" (CADUs checked).
+
+    Bare transfer frames (``frame_length``) have no Reed-Solomon code: ``reed_solomon`` is ignored.
     """
     rows = []
-    for k, (o, f) in enumerate(decode(data, interleave, randomized, fecf), start=1):
+    for k, (o, f) in enumerate(decode(data, interleave, randomized, fecf, frame_length), start=1):
         rows.append(dict(n=k, offset=o, **f))
         if progress is not None and k % 2000 == 0:
             progress("frames", o, len(data))
     if progress is not None:
         progress("frames", len(data), len(data))
-    if not reed_solomon:
+    if not reed_solomon or frame_length:
         return rows
     errors = check_reed_solomon(data, [r["offset"] for r in rows], interleave, randomized,
                                 None if progress is None else lambda d, t: progress("reed-solomon", d, t))
@@ -367,14 +435,15 @@ IDLE_APID = 0x7FF  # idle packets (CCSDS 133.0-B)
 SEQ_MOD = 1 << 14  # packet sequence count: 14 bits
 
 
-def frame_data_fields(data: bytes, rows, interleave: int = 5, randomized: bool = True, fecf: bool = False):
+def frame_data_fields(data: bytes, rows, interleave: int = 5, randomized: bool = True, fecf: bool = False,
+                      frame_length: int = 0):
     """Yield (row, data field) of every frame but the uncorrectable ones, corrected by the Reed-Solomon code."""
-    frame_len, codeblock_len = RS_K * interleave, RS_N * interleave
+    sync_len, codeblock_len, frame_len = layout(interleave, frame_length)
     prn = pseudo_random_sequence(codeblock_len) if randomized else None
     for r in rows:
         if r.get("rs") == "uncorrectable":
             continue
-        base = r["offset"] + len(ASM)
+        base = r["offset"] + sync_len
         if r.get("rs") == "corrected":
             block = data[base:base + codeblock_len]
             block = _xor(block, prn) if prn is not None else block
@@ -388,7 +457,7 @@ def frame_data_fields(data: bytes, rows, interleave: int = 5, randomized: bool =
 
 
 def iter_packets(data: bytes, rows, interleave: int = 5, randomized: bool = True, fecf: bool = False,
-                 keep_data: bool = False, vc_stats=None, progress=None):
+                 keep_data: bool = False, vc_stats=None, progress=None, frame_length: int = 0):
     """Space Packets rebuilt from the frames, virtual channel by virtual channel, in order of arrival.
 
     Yields (vc, apid, seq_flags, seq_count, length, sec_header_flag, frame, chain, packet), with ``frame``
@@ -404,7 +473,7 @@ def iter_packets(data: bytes, rows, interleave: int = 5, randomized: bool = True
     state = {}
     chains = iter(range(1 << 62))
     total = len(rows)
-    for k, (r, field) in enumerate(frame_data_fields(data, rows, interleave, randomized, fecf)):
+    for k, (r, field) in enumerate(frame_data_fields(data, rows, interleave, randomized, fecf, frame_length)):
         if progress is not None and k % 2000 == 0:
             progress(r["n"], total)
         vc = r["vcid"]
@@ -479,7 +548,7 @@ def _extract(vc, s, st, keep_data):
 
 
 def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool = True, fecf: bool = False,
-                      max_gaps: int = 500, progress=None) -> dict:
+                      max_gaps: int = 500, progress=None, frame_length: int = 0) -> dict:
     """Packets of the file per virtual channel and per APID, with the gaps of the sequence counters.
 
     A counter that goes back (by more than half its range: a jump of more than 8192 forward is read as one
@@ -496,7 +565,7 @@ def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool =
     gaps = []
     seqs = {}
     for vc, apid, flags, seq, length, sec, frame, chain, _ in iter_packets(
-            data, rows, interleave, randomized, fecf, vc_stats=vcs, progress=progress):
+            data, rows, interleave, randomized, fecf, vc_stats=vcs, progress=progress, frame_length=frame_length):
         a = apids.get((apid, vc))
         if a is None:
             a = apids[(apid, vc)] = {"apid": apid, "vc": vc, "packets": 0, "bytes": 0, "min_length": length,
@@ -629,7 +698,7 @@ def _apid_text(apids) -> str:
 
 
 def export_packets(data: bytes, rows, folder: str, interleave: int = 5, randomized: bool = True,
-                   fecf: bool = False, include_idle: bool = False, progress=None) -> dict:
+                   fecf: bool = False, include_idle: bool = False, progress=None, frame_length: int = 0) -> dict:
     """Write the packets of each APID to <folder>/apid_<APID>.bin (in order of arrival) and the list of
     every packet to <folder>/packets.csv. Returns {APID: packets written}."""
     import os
@@ -641,7 +710,8 @@ def export_packets(data: bytes, rows, folder: str, interleave: int = 5, randomiz
             writer = csv.writer(f)
             writer.writerow(("vc", "apid", "seq_flags", "seq_count", "length", "sec_header_flag", "cadu", "chain"))
             for vc, apid, flags, seq, length, sec, frame, chain, packet in iter_packets(
-                    data, rows, interleave, randomized, fecf, keep_data=True, progress=progress):
+                    data, rows, interleave, randomized, fecf, keep_data=True, progress=progress,
+                    frame_length=frame_length):
                 if apid == IDLE_APID and not include_idle:
                     continue
                 writer.writerow((vc, apid, flags, seq, length, sec, frame, chain))
@@ -656,7 +726,7 @@ def export_packets(data: bytes, rows, folder: str, interleave: int = 5, randomiz
 
 
 def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50, all_rows=None, packets=None,
-            checked_apids=None) -> list[str]:
+            checked_apids=None, unit: str = "CADUs") -> list[str]:
     """Summary of a file of CADUs: counts, Reed-Solomon, spacecraft, virtual channels, frame counters, CLCW
     and, with ``packets`` (from packet_statistics), the packets per VC and APID.
 
@@ -665,8 +735,11 @@ def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50, all_rows=N
     """
     all_rows = rows if all_rows is None else all_rows
     n = len(all_rows)
-    lines = [f"CADUs: {n} of {cadu_len} bytes ({n * cadu_len} bytes)"]
-    lines += reed_solomon_lines(all_rows, max_listed, list_bad=len(rows) == n)
+    lines = [f"{unit}: {n} of {cadu_len} bytes ({n * cadu_len} bytes)"]
+    if n * cadu_len < data_len and unit != "CADUs":
+        lines.append(f"  {data_len - n * cadu_len} bytes at the end of the file are not a whole frame")
+    lines += (reed_solomon_lines(all_rows, max_listed, list_bad=len(rows) == n) if unit == "CADUs"
+              else ["Reed-Solomon: none (transfer frames carry no check symbols)"])
     if len(rows) < n:
         lines.append(f"Analysis below on {len(rows)} frames: {n - len(rows)} uncorrectable frames excluded")
     if not rows:
@@ -782,10 +855,14 @@ def parse_selection(text: str, count: int) -> list[int]:
     return numbers
 
 
-def codeblock_at(data: bytes, offset: int, interleave: int = 5, randomized: bool = True) -> tuple[bytes, bytes]:
-    """(CADU as received, de-randomized codeblock) of the CADU starting at ``offset``."""
-    cadu = data[offset:offset + len(ASM) + RS_N * interleave]
-    codeblock = cadu[len(ASM):]
+def codeblock_at(data: bytes, offset: int, interleave: int = 5, randomized: bool = True,
+                 frame_length: int = 0) -> tuple[bytes, bytes]:
+    """(CADU as received, de-randomized codeblock) of the CADU starting at ``offset``.
+
+    Bare transfer frames (``frame_length``): (frame as received, de-randomized frame)."""
+    sync_len, block_len, _ = layout(interleave, frame_length)
+    cadu = data[offset:offset + sync_len + block_len]
+    codeblock = cadu[sync_len:]
     if randomized:
         codeblock = _xor(codeblock, pseudo_random_sequence(len(codeblock)))
     return cadu, codeblock
@@ -836,11 +913,14 @@ def hex_dump(block: bytes, marks: list[tuple[int, str]]) -> list[str]:
 
 
 def show_cadu(number: int, row: dict, data: bytes, interleave: int, randomized: bool, fecf: bool,
-              dump: bool = True, reed_solomon: bool = True) -> list[str]:
-    """Detailed content of one CADU: sync marker, Reed-Solomon, header and CLCW fields, packets, hex dump."""
-    cadu, codeblock = codeblock_at(data, row["offset"], interleave, randomized)
+              dump: bool = True, reed_solomon: bool = True, frame_length: int = 0) -> list[str]:
+    """Detailed content of one CADU: sync marker, Reed-Solomon, header and CLCW fields, packets, hex dump.
+
+    Bare transfer frames (``frame_length``): the frame, with no sync marker and no Reed-Solomon code."""
+    cadu, codeblock = codeblock_at(data, row["offset"], interleave, randomized, frame_length)
+    _, _, frame_len = layout(interleave, frame_length)
     rs_lines = []
-    if reed_solomon:
+    if reed_solomon and not frame_length:
         fixed, counts = rs_ccsds.codeblock_status(codeblock, interleave)
         words = ", ".join(f"{i + 1}: " + ("uncorrectable" if c < 0 else f"{c} corrected" if c else "ok")
                           for i, c in enumerate(counts))
@@ -851,18 +931,22 @@ def show_cadu(number: int, row: dict, data: bytes, interleave: int, randomized: 
             codeblock = fixed
         if any(c < 0 for c in counts):
             rs_lines.append("  uncorrectable: the fields below may be wrong")
-        row = dict(row, **parse_frame(codeblock[:RS_K * interleave], fecf))
-    frame_len = RS_K * interleave
+        row = dict(row, **parse_frame(codeblock[:frame_len], fecf))
     frame = codeblock[:frame_len]
     end = frame_len - (2 if fecf else 0) - (4 if row["ocf_flag"] else 0)
     start = 6
     if row["sec_header_flag"]:
         start += (frame[6] & 0x3F) + 1
-    lines = [f"CADU #{number} at byte {row['offset']} of the file ({len(cadu)} bytes)",
-             f"Sync marker: {cadu[:4].hex().upper()}" + ("" if cadu[:4] == ASM else "  (not 1ACFFC1D)"),
-             f"Codeblock: {'de-randomized' if randomized else 'not randomized'}; transfer frame {frame_len} bytes, "
-             f"RS check symbols {len(codeblock) - frame_len} bytes",
-             *rs_lines,
+    if frame_length:
+        lines = [f"Transfer frame #{number} at byte {row['offset']} of the file ({len(cadu)} bytes)",
+                 f"Frame: {'de-randomized' if randomized else 'not randomized'}; no sync marker, "
+                 "no Reed-Solomon code (file of transfer frames)"]
+    else:
+        lines = [f"CADU #{number} at byte {row['offset']} of the file ({len(cadu)} bytes)",
+                 f"Sync marker: {cadu[:4].hex().upper()}" + ("" if cadu[:4] == ASM else "  (not 1ACFFC1D)"),
+                 f"Codeblock: {'de-randomized' if randomized else 'not randomized'}; transfer frame {frame_len} "
+                 f"bytes, RS check symbols {len(codeblock) - frame_len} bytes"]
+    lines += [*rs_lines,
              "",
              f"Primary header (bytes 0-5): {frame[:6].hex(' ').upper()}"]
     lines += ["  " + line for line in _bit_table(int.from_bytes(frame[:6], "big"), 48, PRIMARY_HEADER_FIELDS, {})]
@@ -906,17 +990,26 @@ def show_cadu(number: int, row: dict, data: bytes, interleave: int, randomized: 
             marks.append((end, "OCF"))
         if fecf:
             marks.append((frame_len - 2, "FECF"))
-        marks.append((frame_len, "Reed-Solomon check symbols"))
-        lines += ["", "Codeblock (de-randomized), offsets from the start of the transfer frame:"
-                  if randomized else "Codeblock, offsets from the start of the transfer frame:"]
+        if not frame_length:
+            marks.append((frame_len, "Reed-Solomon check symbols"))
+        what = "Transfer frame" if frame_length else "Codeblock"
+        lines += ["", f"{what} (de-randomized), offsets from the start of the transfer frame:"
+                  if randomized else f"{what}, offsets from the start of the transfer frame:"]
         lines += hex_dump(codeblock, marks)
     return lines
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("file", help="file of CADUs (binary, or hexadecimal text)")
+    ap.add_argument("file", help="file of CADUs or of transfer frames (binary, or hexadecimal text)")
     ap.add_argument("--version", action="version", version=f"{APP_NAME} {APP_VERSION} - author: {APP_AUTHOR}")
+    ap.add_argument("--input", choices=("auto", "cadu", "frames"), default="auto",
+                    help="what the file holds: cadu (sync marker 1ACFFC1D + codeblock), frames (bare transfer "
+                         "frames one after the other: no sync marker, no Reed-Solomon code) or auto (default: "
+                         "cadu when the file has sync markers one CADU apart)")
+    ap.add_argument("--frame-length", type=int, default=0, metavar="BYTES",
+                    help="length of the transfer frames of a file of frames (default: detected; implies "
+                         "--input frames)")
     ap.add_argument("--interleave", type=int, default=5, help="RS interleaving depth I (default 5: 1279-byte CADU)")
     ap.add_argument("--randomization", choices=("auto", "yes", "no"), default="auto",
                     help="whether the codeblocks are randomized: auto (default: detected from the frames), yes, "
@@ -956,24 +1049,46 @@ def main(argv=None) -> int:
         ap.error(f"--check-apids: {exc}")
     if args.export_packets and args.no_packets:
         ap.error("--export-packets contradicts --no-packets")
+    if args.frame_length and args.input == "cadu":
+        ap.error("--frame-length applies to a file of transfer frames, not of CADUs")
+    if args.frame_length and not 8 <= args.frame_length <= MAX_FRAME_LEN:
+        ap.error(f"the frame length must be 8 to {MAX_FRAME_LEN} bytes")
 
     data = read_input(args.file)
+    kind = "frames" if args.frame_length else args.input
+    if kind == "auto":
+        kind = detect_input(data, args.interleave)
+    frame_length, length_how = 0, ""
+    if kind == "frames":
+        if args.exclude_bad:
+            ap.error("--exclude-bad needs the Reed-Solomon code: transfer frames have none")
+        frame_length, length_how = args.frame_length, "option"
+        if not frame_length:
+            frame_length, length_how = detect_frame_length(data), "detected"
+        if not frame_length:
+            frame_length, length_how = RS_K * args.interleave, f"not detected: 223 x I = {RS_K * args.interleave}"
     if args.not_randomized or args.randomization == "no":
         randomized, how = False, "not randomized (option)"
     elif args.randomization == "yes":
         randomized, how = True, "randomized (option)"
     else:
-        randomized = detect_randomization(data, args.interleave, args.fecf)
+        randomized = detect_randomization(data, args.interleave, args.fecf, frame_length=frame_length)
         how = ("randomized" if randomized else "not randomized, already de-randomized") + " (detected)"
     if args.show:  # one CADU: no need to check the whole file
-        rows = decode_all(data, args.interleave, randomized, args.fecf, reed_solomon=False)
+        rows = decode_all(data, args.interleave, randomized, args.fecf, reed_solomon=False, frame_length=frame_length)
     else:
-        rows = decode_all(data, args.interleave, randomized, args.fecf, reed_solomon=not args.no_rs)
-    cadu_len = len(ASM) + RS_N * args.interleave
-    print(f"{args.file}: {len(data)} bytes; CADU {cadu_len} bytes, transfer frame {RS_K * args.interleave} "
-          f"bytes (I = {args.interleave}); codeblocks {how}")
+        rows = decode_all(data, args.interleave, randomized, args.fecf, reed_solomon=not args.no_rs,
+                          frame_length=frame_length)
+    sync_len, block_len, frame_len = layout(args.interleave, frame_length)
+    cadu_len = sync_len + block_len
+    if frame_length:
+        print(f"{args.file}: {len(data)} bytes; transfer frames of {frame_len} bytes ({length_how}), "
+              f"no sync marker, no Reed-Solomon code; frames {how}")
+    else:
+        print(f"{args.file}: {len(data)} bytes; CADU {cadu_len} bytes, transfer frame {frame_len} "
+              f"bytes (I = {args.interleave}); codeblocks {how}")
     if not rows:
-        print("No sync marker 1ACFFC1D found.")
+        print("The file is shorter than one transfer frame." if frame_length else "No sync marker 1ACFFC1D found.")
         return 1
     if args.show:
         try:
@@ -983,12 +1098,14 @@ def main(argv=None) -> int:
         for number in numbers:
             print()
             print("\n".join(show_cadu(number, rows[number - 1], data, args.interleave, randomized,
-                                      args.fecf, dump=not args.no_dump, reed_solomon=not args.no_rs)))
+                                      args.fecf, dump=not args.no_dump, reed_solomon=not args.no_rs,
+                                      frame_length=frame_length)))
         return 0
     analysed = [r for r in rows if r.get("rs") != "uncorrectable"] if args.exclude_bad else rows
-    packets = None if args.no_packets else packet_statistics(data, rows, args.interleave, randomized, args.fecf)
+    packets = None if args.no_packets else packet_statistics(data, rows, args.interleave, randomized, args.fecf,
+                                                             frame_length=frame_length)
     print("\n".join(summary(analysed, len(data), cadu_len, all_rows=rows, packets=packets,
-                             checked_apids=checked_apids)))
+                             checked_apids=checked_apids, unit="Transfer frames" if frame_length else "CADUs")))
 
     if args.frames is not None:
         shown = analysed if args.frames == 0 else analysed[:args.frames]
@@ -1005,7 +1122,8 @@ def main(argv=None) -> int:
         print(f"\nFrames written to {args.output}" + (" (uncorrectable frames excluded)"
                                                        if len(analysed) < len(rows) else ""))
     if args.export_packets:
-        counts = export_packets(data, rows, args.export_packets, args.interleave, randomized, args.fecf)
+        counts = export_packets(data, rows, args.export_packets, args.interleave, randomized, args.fecf,
+                                frame_length=frame_length)
         print(f"\nPackets written to {args.export_packets}: " + (", ".join(
             f"APID {apid}: {n}" for apid, n in sorted(counts.items())) or "none") + "; list in packets.csv")
     return 0

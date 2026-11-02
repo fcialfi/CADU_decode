@@ -1,6 +1,6 @@
 # CADU_decode
 
-Decodifica i campi fissi dei transfer frame contenuti in un file di CADU (CCSDS TM).
+Decodifica i campi fissi dei transfer frame contenuti in un file di CADU (CCSDS TM) o di transfer frame.
 
 **Autore:** Fabio Cialfi (Exostaff). Software proprietario: vedi [Licenza](#licenza).
 
@@ -23,6 +23,26 @@ Per ogni CADU lo script:
   No bit lock, Lockout, Wait, Retransmit, FARM-B counter, report value.
 
 Il codice Reed-Solomon è decodificato (sezione sotto); i pacchetti del data field sono mostrati con `--show`.
+
+## File di transfer frame
+
+Il file può contenere anche i soli **transfer frame**, come li salvano molti ricevitori: uno dopo l'altro
+dall'inizio del file, senza sync marker, già de-randomizzati e senza i simboli Reed-Solomon (per esempio
+`06 8E A6 08 1F FE 5A 5A …`: SCID 104, VC 7, frame idle). `--input` sceglie cosa contiene il file:
+
+- `auto` (default): CADU se nel file ci sono sync marker `1ACFFC1D` a distanza fissa, altrimenti transfer frame;
+- `cadu`: CADU (sync marker + codeblock);
+- `frames`: transfer frame.
+
+La lunghezza dei frame è riconosciuta da sola (versione 0, stesso SCID e master channel counter che sale di 1
+da un frame al successivo, provando tutte le lunghezze fino a 2048 byte); `--frame-length 1115` la impone
+(e vale `--input frames`). Se non viene riconosciuta si usa 223 · I. Sui transfer frame non c'è codice
+Reed-Solomon da verificare: il controllo e `--exclude-bad` non si applicano, e il riepilogo lo dice. Tutto il resto
+(virtual channel, contatori, CLCW, pacchetti, `--show`, export) è lo stesso dei CADU; `--show` mostra il frame
+senza sync marker e senza simboli Reed-Solomon. I byte in fondo al file che non fanno un frame intero sono segnalati.
+
+    python cadu_decode.py frames.bin                       # riconosciuto da solo
+    python cadu_decode.py frames.bin --frame-length 1115   # lunghezza imposta
 
 ## Reed-Solomon e FER
 
@@ -115,7 +135,9 @@ salta la ricostruzione.
 - **Reed-Solomon check** e **Exclude uncorrectable frames** in alto; la colonna RS dice ok, corr. n (byte
   corretti) o FAIL; senza il controllo Reed-Solomon le caselle che ne dipendono (Exclude uncorrectable frames,
   Only RS errors) sono tolte e disattivate; con i frame non correggibili esclusi, Only RS errors diventa Only RS-corrected frames (gli unici errori rimasti sono i frame corretti);
-- **Open…** carica il file; interleaving, randomizzazione (Auto / Yes / No) e FECF si cambiano in alto e il file
+- **Open…** carica il file; **Input** (Auto / CADU / Frames) dice se contiene CADU o transfer frame e **Frame
+  bytes** la lunghezza dei transfer frame (Auto: riconosciuta); con i transfer frame il controllo Reed-Solomon è
+  disattivato; interleaving, randomizzazione (Auto / Yes / No) e FECF si cambiano in alto e il file
   viene riletto; accanto al nome del file è scritto se i codeblock sono stati letti come randomizzati;
 - scheda **Summary**: il riepilogo in forma grafica: riquadri con i numeri principali (CADU, frame senza errori, corretti, non correggibili, FER,
   spacecraft), il grafico degli errori Reed-Solomon lungo il file (byte corretti per frame

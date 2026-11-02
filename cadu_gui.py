@@ -78,12 +78,13 @@ class CaduWindow:
         self.rows: list[dict] = []
         self.path = None
         self.cadu_len = 0
+        self.frame_length = 0  # 0: CADUs; otherwise a file of bare transfer frames of this length
         self.randomized = True
         self.usual = None
         self.packets = None
         self.license_status = license_status or licensing.check_license()
         root.title(f"{APP_NAME} {APP_VERSION}")
-        root.geometry("1250x880")
+        root.geometry("1320x880")
         _set_icon(root)
         self.mono = tkfont.nametofont("TkFixedFont").copy()
         self.mono.configure(size=10)
@@ -92,12 +93,27 @@ class CaduWindow:
         bar = ttk.Frame(root, padding=(10, 8))
         bar.pack(fill=tk.X)
         ttk.Button(bar, text="Open…", command=self.open_file).pack(side=tk.LEFT)
+        # What the file holds: CADUs (sync marker + codeblock) or bare transfer frames
+        self.input_var = tk.StringVar(value="Auto")
+        self.length_var = tk.StringVar(value="Auto")
+        ttk.Label(bar, text="  Input").pack(side=tk.LEFT)
+        box = ttk.Combobox(bar, textvariable=self.input_var, values=("Auto", "CADU", "Frames"),
+                           width=7, state="readonly")
+        box.pack(side=tk.LEFT, padx=(4, 0))
+        box.bind("<<ComboboxSelected>>", lambda _e: self.reload())
+        ttk.Label(bar, text="  Frame bytes").pack(side=tk.LEFT)
+        self.length_box = ttk.Combobox(bar, textvariable=self.length_var, width=5,
+                                       values=("Auto", "1115", "1024", "892", "2048"))
+        self.length_box.pack(side=tk.LEFT, padx=(4, 0))
+        self.length_box.bind("<<ComboboxSelected>>", lambda _e: self.reload())
+        self.length_box.bind("<Return>", lambda _e: self.reload())
         self.interleave_var = tk.IntVar(value=5)
         self.randomized_var = tk.StringVar(value="Auto")
         self.fecf_var = tk.BooleanVar(value=False)
         ttk.Label(bar, text="  RS interleaving I").pack(side=tk.LEFT)
-        ttk.Spinbox(bar, from_=1, to=8, width=3, textvariable=self.interleave_var,
-                    command=self.reload).pack(side=tk.LEFT, padx=(4, 10))
+        self.interleave_box = ttk.Spinbox(bar, from_=1, to=8, width=3, textvariable=self.interleave_var,
+                                          command=self.reload)
+        self.interleave_box.pack(side=tk.LEFT, padx=(4, 10))
         ttk.Label(bar, text="Randomized").pack(side=tk.LEFT)
         box = ttk.Combobox(bar, textvariable=self.randomized_var, values=("Auto", "Yes", "No"), width=6,
                            state="readonly")
@@ -105,8 +121,8 @@ class CaduWindow:
         box.bind("<<ComboboxSelected>>", lambda _e: self.reload())
         ttk.Checkbutton(bar, text="FECF", variable=self.fecf_var, command=self.reload).pack(side=tk.LEFT, padx=(8, 0))
         self.rs_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(bar, text="Reed-Solomon check", variable=self.rs_var,
-                        command=self.reload).pack(side=tk.LEFT, padx=(12, 0))
+        self.rs_box = ttk.Checkbutton(bar, text="Reed-Solomon check", variable=self.rs_var, command=self.reload)
+        self.rs_box.pack(side=tk.LEFT, padx=(12, 0))
         # Analysis options (no new decoding): they need the Reed-Solomon check.
         ttk.Separator(bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=12)
         self.exclude_var = tk.BooleanVar(value=False)
@@ -122,7 +138,8 @@ class CaduWindow:
         root.bind_all("<Control-q>", lambda _e: self.exit_app())
         root.bind_all("<F1>", lambda _e: self.show_about())
         root.protocol("WM_DELETE_WINDOW", self.exit_app)
-        self.file_var = tk.StringVar(value="No file: press Open… (CADUs starting with the sync marker 1ACFFC1D)")
+        self.file_var = tk.StringVar(value="No file: press Open… (CADUs starting with the sync marker 1ACFFC1D, "
+                                           "or transfer frames)")
         status = ttk.Frame(root, padding=(10, 0))
         status.pack(fill=tk.X)
         ttk.Label(status, textvariable=self.file_var).pack(side=tk.LEFT)
@@ -342,7 +359,11 @@ class CaduWindow:
         With the uncorrectable frames excluded, the RS errors left are the corrected frames: the
         box says so.
         """
-        rs = self.rs_var.get()
+        frames = self.frame_length > 0
+        rs = self.rs_var.get() and not frames  # transfer frames have no Reed-Solomon code
+        self.rs_box.state(["disabled"] if frames else ["!disabled"])
+        self.interleave_box.state(["disabled"] if self.frame_length and self.length_var.get() != "Auto"
+                                  else ["!disabled"])  # Auto falls back to 223 x I
         if not rs:
             self.exclude_var.set(False)
             self.rserr_var.set(False)
@@ -354,27 +375,63 @@ class CaduWindow:
         self._sync_checks()
         self.refresh()
 
+    def _input_layout(self, interleave: int) -> tuple[int, str]:
+        """(frame length, how it was chosen) of a file of transfer frames; (0, "") for CADUs."""
+        kind = self.input_var.get()
+        if kind == "Auto":
+            kind = "Frames" if cd.detect_input(self.data, interleave) == "frames" else "CADU"
+        if kind == "CADU":
+            return 0, ""
+        text = self.length_var.get().strip()
+        if text and text != "Auto":
+            try:
+                length = int(text)
+                if not 8 <= length <= cd.MAX_FRAME_LEN:
+                    raise ValueError
+                return length, "set"
+            except ValueError:
+                messagebox.showerror("Frame length", f"The frame length must be 8 to {cd.MAX_FRAME_LEN} bytes, "
+                                                     "or Auto.")
+                self.length_var.set("Auto")
+        length = cd.detect_frame_length(self.data)
+        if length:
+            return length, "detected"
+        return cd.RS_K * interleave, f"not detected: 223 x I"
+
     def _load(self) -> None:
         interleave = int(self.interleave_var.get())
+        self.frame_length, length_how = self._input_layout(interleave)
+        self._sync_checks()
         choice = self.randomized_var.get()
         if choice == "Auto":
-            self.randomized = cd.detect_randomization(self.data, interleave, self.fecf_var.get())
+            self.randomized = cd.detect_randomization(self.data, interleave, self.fecf_var.get(),
+                                                      frame_length=self.frame_length)
             how = ("randomized" if self.randomized else "not randomized, already de-randomized") + " (detected)"
         else:
             self.randomized = choice == "Yes"
             how = "randomized" if self.randomized else "not randomized"
         name = os.path.basename(self.path)
         self.rows = cd.decode_all(self.data, interleave, self.randomized, self.fecf_var.get(),
-                                  reed_solomon=self.rs_var.get(), progress=self._step)
-        self.cadu_len = len(cd.ASM) + cd.RS_N * interleave
+                                  reed_solomon=self.rs_var.get(), progress=self._step,
+                                  frame_length=self.frame_length)
+        sync_len, block_len, frame_len = cd.layout(interleave, self.frame_length)
+        self.cadu_len = sync_len + block_len
         self._step("packets")
         self.packets = cd.packet_statistics(self.data, self.rows, interleave, self.randomized, self.fecf_var.get(),
-                                            progress=lambda done, total: self._step("packets", done, total))
+                                            progress=lambda done, total: self._step("packets", done, total),
+                                            frame_length=self.frame_length)
         self._step("display")
         self.refresh(progress=True)
-        self._file_line = (f"{name}: {len(self.data)} bytes; CADU {self.cadu_len} bytes, "
-                           f"transfer frame {cd.RS_K * interleave} bytes (I = {interleave}); codeblocks {how}")
+        if self.frame_length:
+            self._file_line = (f"{name}: {len(self.data)} bytes; transfer frames of {frame_len} bytes "
+                               f"({length_how}), no sync marker, no Reed-Solomon code; frames {how}")
+        else:
+            self._file_line = (f"{name}: {len(self.data)} bytes; CADU {self.cadu_len} bytes, "
+                               f"transfer frame {frame_len} bytes (I = {interleave}); codeblocks {how}")
         self.file_var.set(self._file_line)
+
+    def _unit(self) -> str:
+        return "Transfer frames" if self.frame_length else "CADUs"
 
     def _analysed(self):
         if self.exclude_var.get():
@@ -392,11 +449,13 @@ class CaduWindow:
         if self.rows:
             self._set_text(self.summary_text, cd.summary(self._analysed(), len(self.data), self.cadu_len,
                                                          all_rows=self.rows, packets=self.packets,
-                                                         checked_apids=checked))
+                                                         checked_apids=checked, unit=self._unit()))
         else:
-            self._set_text(self.summary_text, ["No sync marker 1ACFFC1D found."])
+            self._set_text(self.summary_text, ["The file is shorter than one transfer frame." if self.frame_length
+                                               else "No sync marker 1ACFFC1D found."])
         top = self.summary_view.canvas.yview()[0]
-        self.summary_view.update_view(self._analysed(), self.rows, len(self.data), self.cadu_len, self.packets)
+        self.summary_view.update_view(self._analysed(), self.rows, len(self.data), self.cadu_len, self.packets,
+                                      unit=self._unit())
         self.root.update_idletasks()
         self.summary_view.canvas.yview_moveto(top)  # keep the page where it was
 
@@ -486,7 +545,7 @@ class CaduWindow:
         number = int(selection[0])
         self.detail_view.show(number, self.rows[number - 1], self.data, int(self.interleave_var.get()),
                               self.randomized, self.fecf_var.get(), reed_solomon=self.rs_var.get(),
-                              dump=self.dump_var.get(), usual=self.usual)
+                              dump=self.dump_var.get(), usual=self.usual, frame_length=self.frame_length)
 
     def export_packets(self) -> None:
         """Packets of each APID to <folder>/apid_NNNN.bin, and their list to packets.csv."""
@@ -502,7 +561,8 @@ class CaduWindow:
         try:
             counts = cd.export_packets(self.data, self.rows, folder, int(self.interleave_var.get()), self.randomized,
                                        self.fecf_var.get(),
-                                       progress=lambda done, total: self._step("packets", done, total))
+                                       progress=lambda done, total: self._step("packets", done, total),
+                                       frame_length=self.frame_length)
         except OSError as exc:
             error = exc
         finally:

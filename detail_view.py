@@ -44,34 +44,39 @@ class DetailView(Page):
     def _badge(self, parent, text, color):
         tk.Label(parent, text=f" {text} ", bg=color, fg="#ffffff", font=self.f_small).pack(side=tk.LEFT, padx=(0, 6))
 
-    def show(self, number, row, data, interleave, randomized, fecf, reed_solomon=True, dump=True, usual=None):
+    def show(self, number, row, data, interleave, randomized, fecf, reed_solomon=True, dump=True, usual=None,
+             frame_length=0):
+        """``frame_length``: a file of bare transfer frames (no sync marker, no Reed-Solomon code)."""
         self._clear()
         self.canvas.yview_moveto(0)
-        cadu, raw_block = cd.codeblock_at(data, row["offset"], interleave, randomized)
+        cadu, raw_block = cd.codeblock_at(data, row["offset"], interleave, randomized, frame_length)
         block = raw_block
         counts = None
-        if reed_solomon:
+        if reed_solomon and not frame_length:
             block, counts = rs_ccsds.codeblock_status(raw_block, interleave)
-        frame_len = cd.RS_K * interleave
+        frame_len = cd.layout(interleave, frame_length)[2]
         frame = block[:frame_len]
         fields = cd.parse_frame(frame, fecf)
         corrected = {i for i in range(len(block)) if block[i] != raw_block[i]}
         end = frame_len - (2 if fecf else 0) - (4 if fields["ocf_flag"] else 0)
         start = 6 + ((frame[6] & 0x3F) + 1 if fields["sec_header_flag"] else 0)
         self.text_lines = cd.show_cadu(number, row, data, interleave, randomized, fecf, dump=dump,
-                                       reed_solomon=reed_solomon)
+                                       reed_solomon=reed_solomon, frame_length=frame_length)
 
         # Title line.
         head = tk.Frame(self.page, bg=BG)
         head.pack(fill=tk.X, padx=16, pady=(14, 0))
-        tk.Label(head, text=f"CADU #{number}", bg=BG, fg=TEXT, font=self.f_value).pack(side=tk.LEFT)
+        tk.Label(head, text=f"{'Transfer frame' if frame_length else 'CADU'} #{number}", bg=BG, fg=TEXT,
+                 font=self.f_value).pack(side=tk.LEFT)
         tk.Label(head, text=f"   byte {row['offset']:,} of the file   ·   VC {fields['vcid']}   ·   "
                  f"MC count {fields['mc_count']}   ·   VC count {fields['vc_count']}   ·   "
                  f"{cd.first_header_pointer_text(fields['first_header_pointer'])} (FHP)",
                  bg=BG, fg=MUTED, font=self.f_small).pack(side=tk.LEFT, pady=(8, 0))
         badges = tk.Frame(self.page, bg=BG)
         badges.pack(fill=tk.X, padx=16, pady=(6, 0))
-        if counts is None:
+        if frame_length:
+            self._badge(badges, "transfer frame: no Reed-Solomon code", MUTED)
+        elif counts is None:
             self._badge(badges, "Reed-Solomon not checked", MUTED)
         elif any(c < 0 for c in counts):
             self._badge(badges, "UNCORRECTABLE: fields may be wrong", BAD)
@@ -80,13 +85,13 @@ class DetailView(Page):
         else:
             self._badge(badges, "no errors", GOOD)
         self._badge(badges, "de-randomized" if randomized else "not randomized", ACCENT)
-        if cadu[:4] != cd.ASM:
+        if not frame_length and cadu[:4] != cd.ASM:
             self._badge(badges, f"sync marker {cadu[:4].hex().upper()}", BAD)
         tk.Button(badges, text="Copy as text", relief="flat", bg=CARD, fg=TEXT, highlightthickness=1,
                   highlightbackground=BORDER, command=self._copy).pack(side=tk.RIGHT)
 
         # Structure.
-        sections = [("sync", "Sync marker", -4, 0)]
+        sections = [] if frame_length else [("sync", "Sync marker", -4, 0)]
         sections.append(("header", "Primary header", 0, 6))
         if start > 6:
             sections.append(("secondary", "Sec. header", 6, start))
@@ -95,7 +100,8 @@ class DetailView(Page):
             sections.append(("ocf", "OCF / CLCW", end, end + 4))
         if fecf:
             sections.append(("fecf", "FECF", frame_len - 2, frame_len))
-        sections.append(("rs", "Reed-Solomon check symbols", frame_len, len(block)))
+        if not frame_length:
+            sections.append(("rs", "Reed-Solomon check symbols", frame_len, len(block)))
         self._section("Structure", f"{len(cadu)} bytes; byte numbers from the start of the transfer frame "
                                    f"({frame_len} bytes)")
         card = self._card()
