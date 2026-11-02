@@ -330,3 +330,37 @@ def test_transfer_frames_cli(tmp_path, capsys):
         cd.main([str(path), "--input", "frames", "--exclude-bad"])
     with pytest.raises(SystemExit):
         cd.main([str(path), "--input", "cadu", "--frame-length", "1115"])
+
+
+def test_several_files_one_summary_each_or_concatenated(tmp_path, capsys):
+    stream = [_packet(100, k, 300) for k in range(60)]
+    whole = b"".join(_frames_from_stream(stream, 1, 0, 0))
+    cuts = [0, 3000, 9000, len(whole)]   # chunks cut in the middle of CADUs
+    paths = []
+    for k in range(3):
+        paths.append(tmp_path / f"chunk_{k}.bin")
+        paths[-1].write_bytes(whole[cuts[k]:cuts[k + 1]])
+
+    # One summary per file: the CADUs cut at the boundaries are lost in each file alone
+    assert cd.main([str(p) for p in paths]) == 0
+    text = capsys.readouterr().out
+    assert text.count("CADUs: ") == 3 and "chunk_0.bin: 3000 bytes" in text and "=" * 100 in text
+
+    # Concatenated: the same as the whole capture, and each frame says where it comes from
+    data, bounds = cd.concatenate([(p.name, p.read_bytes()) for p in paths])
+    assert data == whole and bounds == [(0, "chunk_0.bin"), (3000, "chunk_1.bin"), (9000, "chunk_2.bin")]
+    rows = cd.decode_all(data)
+    cd.tag_files(rows, bounds)
+    assert [(r["file"], r["file_offset"]) for r in rows[:4]] == [
+        ("chunk_0.bin", 0), ("chunk_0.bin", 1279), ("chunk_0.bin", 2558), ("chunk_1.bin", 837)]
+    assert cd.position_text(rows[3]) == "byte 837 of chunk_1.bin"
+    assert cd.packet_statistics(data, rows)["apids"] == cd.packet_statistics(whole, cd.decode_all(whole))["apids"]
+    assert cd.main([str(p) for p in paths] + ["--concat", "--frames", "5"]) == 0
+    text = capsys.readouterr().out
+    assert "3 files concatenated" in text and f"CADUs: {len(whole) // 1279}" in text
+    assert "Files concatenated (frames starting in each): chunk_0.bin 3, chunk_1.bin 5" in text
+    assert "file offset" in text
+    assert cd.main([str(p) for p in paths] + ["--concat", "--show", "4", "--no-dump"]) == 0
+    assert "CADU #4 at byte 837 of chunk_1.bin" in capsys.readouterr().out
+    with pytest.raises(SystemExit):   # one CSV for several summaries: ambiguous
+        cd.main([str(p) for p in paths] + ["-o", str(tmp_path / "x.csv")])
