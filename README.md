@@ -60,6 +60,21 @@ il menu **File** sotto la barra sceglie quello da vedere (riepilogo, frame e pac
 *All files, concatenated* li unisce in ordine di nome; la tabella dei frame ha allora la colonna **File** e
 l'offset è quello nel file.
 
+### Riepilogo per file
+
+`--overview` dà, per più file, una tabella con una riga per file e i totali: satellite, stazione, inizio e fine
+del passaggio (dal nome del file), durata, CADU o transfer frame, frame, frame per VC, MB del file, frame idle,
+frame mancanti (master channel counter), Reed-Solomon (frame corretti, non correggibili, FER) e pacchetti (numero e
+MB senza gli idle). Le righe sono in ordine di inizio del passaggio. Nel nome
+`AWS1_H_1_20261028T150735_20261028T145625_20261028T150732_SVA` il primo tempo è quando il file è stato fatto, il
+secondo e il terzo sono il passaggio (14:56:25 → 15:07:32), `AWS1` il satellite e `SVA` la stazione; con due tempi
+sono il passaggio, con uno l'inizio.
+
+    python cadu_decode.py AWS1_*.bin --overview
+
+Nella finestra, con più file aperti, la stessa tabella è nella scheda **Files** (calcolata quando la si apre, con
+le opzioni della barra); doppio clic su una riga apre quel file.
+
 ## Reed-Solomon e FER
 
 Lo script decodifica il codice Reed-Solomon (255,223) CCSDS (`rs_ccsds.py`: campo con x⁸ + x⁷ + x² + x + 1,

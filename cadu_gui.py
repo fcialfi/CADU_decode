@@ -149,7 +149,7 @@ class CaduWindow:
         # Several files opened: the one shown, or all of them as one stream (chunks of one capture)
         self.choice_var = tk.StringVar()
         self.choice_label = ttk.Label(status, text="File")
-        self.choice_box = ttk.Combobox(status, textvariable=self.choice_var, width=34, state="readonly")
+        self.choice_box = ttk.Combobox(status, textvariable=self.choice_var, width=60, state="readonly")
         self.choice_box.bind("<<ComboboxSelected>>", lambda _e: self.select_file())
         self.file_label = ttk.Label(status, textvariable=self.file_var)
         self.file_label.pack(side=tk.LEFT)
@@ -228,6 +228,38 @@ class CaduWindow:
         self.summary_text = self._text(report)
         self.summary_text.master.pack(fill=tk.BOTH, expand=True)
 
+        # Several files: one row each (pass from the file name) and the totals; shown with 2 files or more.
+        self.files_tab = ttk.Frame(self.tabs)
+        top = ttk.Frame(self.files_tab, padding=(0, 4))
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="One row per file, in order of pass start (pass times and station from the file name). "
+                            "MB: size of the file; packet MB: packets without the idle ones. "
+                            "Double click: open the file.").pack(side=tk.LEFT)
+        ttk.Button(top, text="Copy as text", command=self.copy_overview).pack(side=tk.RIGHT)
+        box = ttk.Frame(self.files_tab)
+        box.pack(fill=tk.BOTH, expand=True)
+        heads = cd.overview_table([])[0]
+        widths = (50, 60, 165, 70, 45, 100, 60, 100, 60, 80, 85, 95, 125, 75, 70, 80, 420)
+        self.files_tree = ttk.Treeview(box, columns=[str(k) for k in range(len(heads))], show="headings")
+        for k, (head, width) in enumerate(zip(heads, widths)):
+            self.files_tree.heading(str(k), text=head[0].upper() + head[1:])
+            self.files_tree.column(str(k), width=width, anchor="w" if k in (0, 1, 2, 3, 5, 7, 16) else "e",
+                                   stretch=k == 16)
+        bold = tkfont.nametofont("TkDefaultFont").copy()
+        bold.configure(weight="bold")
+        self.files_tree.tag_configure("total", font=bold)
+        self._bold = bold  # keep a reference: Tk forgets fonts no longer referenced
+        yscroll = ttk.Scrollbar(box, orient=tk.VERTICAL, command=self.files_tree.yview)
+        xscroll = ttk.Scrollbar(box, orient=tk.HORIZONTAL, command=self.files_tree.xview)
+        self.files_tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        yscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        xscroll.pack(side=tk.BOTTOM, fill=tk.X)
+        self.files_tree.pack(fill=tk.BOTH, expand=True)
+        self.files_tree.bind("<Double-1>", self._open_from_overview)
+        self.overview = None      # file_overview() of every file, for the options in self._overview_key
+        self._overview_key = None
+        self.tabs.bind("<<NotebookTabChanged>>", lambda _e: self._tab_changed())
+
         if path:  # after the window is shown, so the progress of the loading is visible
             root.after(50, lambda: self.load(path))
 
@@ -302,10 +334,10 @@ class CaduWindow:
 
     # Overall share of the progress bar taken by each stage of the loading.
     STAGES = {"read": (0, 5), "frames": (5, 30), "reed-solomon": (30, 70), "packets": (70, 85),
-              "display": (85, 100)}
+              "display": (85, 100), "overview": (0, 100)}
     STAGE_TEXT = {"read": "reading the file", "frames": "reading the frames",
                   "reed-solomon": "Reed-Solomon check", "packets": "rebuilding the packets",
-                  "display": "filling the views"}
+                  "display": "filling the views", "overview": "overview of the files"}
 
     def _busy(self, on: bool) -> None:
         """Show the progress bar (and block the other controls) while loading."""
@@ -359,16 +391,68 @@ class CaduWindow:
         self.files = files
         names = [os.path.basename(p) for p, _ in files]
         self.file_label.pack_forget()
+        self.overview = None
         if len(files) > 1:
+            self.tabs.add(self.files_tab, text="Files")
             self.choice_box.configure(values=names + [CONCATENATED])
             self.choice_label.pack(side=tk.LEFT)
             self.choice_box.pack(side=tk.LEFT, padx=(4, 10))
         else:
+            if str(self.files_tab) in self.tabs.tabs():
+                self.tabs.forget(self.files_tab)
             self.choice_label.pack_forget()
             self.choice_box.pack_forget()
         self.file_label.pack(side=tk.LEFT)
         self.choice_var.set(names[0])
         self.select_file(busy=True)
+
+    def _options_key(self) -> tuple:
+        return (self.input_var.get(), self.length_var.get(), int(self.interleave_var.get()),
+                self.randomized_var.get(), self.fecf_var.get(), self.rs_var.get())
+
+    def _tab_changed(self) -> None:
+        if self.files and str(self.files_tab) in self.tabs.tabs() and self.tabs.select() == str(self.files_tab):
+            self.fill_overview()
+
+    def fill_overview(self) -> None:
+        """The Files tab: every file analysed with the options of the toolbar (again when they change)."""
+        if self.overview is None or self._overview_key != self._options_key():
+            kind = {"Auto": "auto", "CADU": "cadu", "Frames": "frames"}[self.input_var.get()]
+            length = self.length_var.get().strip()
+            length = int(length) if length.isdigit() and kind != "cadu" else 0
+            randomization = self.randomized_var.get().lower()
+            shown = self.path
+            self._busy(True)
+            items = []
+            try:
+                for k, (path, data) in enumerate(self.files):
+                    self.path = path
+                    self._step("overview", k, len(self.files))
+                    items.append(cd.file_overview(path, data, int(self.interleave_var.get()), kind, length,
+                                                  randomization, self.fecf_var.get(), reed_solomon=self.rs_var.get()))
+            finally:
+                self.path = shown
+                self._busy(False)
+                self.file_var.set(self._file_line)
+            self.overview, self._overview_key = items, self._options_key()
+        self.files_tree.delete(*self.files_tree.get_children())
+        table = cd.overview_table(self.overview)
+        for k, row in enumerate(table[1:], start=1):
+            total = len(self.overview) > 1 and k == len(table) - 1
+            self.files_tree.insert("", tk.END, iid="total" if total else row[-1], values=row,
+                                   tags=("total",) if total else ())
+
+    def _open_from_overview(self, event) -> None:
+        item = self.files_tree.identify_row(event.y)
+        if item and item != "total":
+            self.choice_var.set(item)
+            self.select_file()
+            self.tabs.select(0)
+
+    def copy_overview(self) -> None:
+        if self.overview:
+            self.root.clipboard_clear()
+            self.root.clipboard_append("\n".join(cd.overview_lines(self.overview)))
 
     def select_file(self, busy: bool = False) -> None:
         """Show the file chosen in File, or all the files read one after the other as one stream."""
