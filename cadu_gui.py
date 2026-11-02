@@ -222,7 +222,7 @@ class CaduWindow:
         panes.bind("<Configure>", _place_sash)
 
         # The summary as text, to read or copy.
-        report = ttk.Frame(self.tabs)
+        report = self.report_tab = ttk.Frame(self.tabs)
         self.tabs.add(report, text="Text report")
         ttk.Button(report, text="Copy to clipboard", command=self.copy_report).pack(anchor="w", pady=(4, 4))
         self.summary_text = self._text(report)
@@ -411,7 +411,8 @@ class CaduWindow:
                 self.randomized_var.get(), self.fecf_var.get(), self.rs_var.get())
 
     def _tab_changed(self) -> None:
-        if self.files and str(self.files_tab) in self.tabs.tabs() and self.tabs.select() == str(self.files_tab):
+        """Files and Text report tabs: with several files, the overview of all of them is computed when needed."""
+        if len(self.files) > 1 and self.tabs.select() in (str(self.files_tab), str(self.report_tab)):
             self.fill_overview()
 
     def fill_overview(self) -> None:
@@ -435,6 +436,7 @@ class CaduWindow:
                 self._busy(False)
                 self.file_var.set(self._file_line)
             self.overview, self._overview_key = items, self._options_key()
+            self._fill_report()
         self.files_tree.delete(*self.files_tree.get_children())
         table = cd.overview_table(self.overview)
         for k, row in enumerate(table[1:], start=1):
@@ -574,18 +576,32 @@ class CaduWindow:
             messagebox.showerror("APIDs", f"{exc}\n\nWrite them as 100 or 15-16, 100.")
             self.check_var.set(cd.DEFAULT_CHECKED_APIDS)
             checked = cd.parse_apids(cd.DEFAULT_CHECKED_APIDS)
-        if self.rows:
-            self._set_text(self.summary_text, cd.summary(self._analysed(), len(self.data), self.cadu_len,
-                                                         all_rows=self.rows, packets=self.packets,
-                                                         checked_apids=checked, unit=self._unit()))
-        else:
-            self._set_text(self.summary_text, ["The file is shorter than one transfer frame." if self.frame_length
-                                               else "No sync marker 1ACFFC1D found."])
+        self._checked = checked
+        self._fill_report()
         top = self.summary_view.canvas.yview()[0]
         self.summary_view.update_view(self._analysed(), self.rows, len(self.data), self.cadu_len, self.packets,
                                       unit=self._unit())
         self.root.update_idletasks()
         self.summary_view.canvas.yview_moveto(top)  # keep the page where it was
+
+    def _fill_report(self) -> None:
+        """Text report: with several files the overview of all of them, then the full summary of the file
+        shown (every frame and gap listed, not only the first 50)."""
+        lines = []
+        if len(self.files) > 1:
+            if self.overview is not None and self._overview_key == self._options_key():
+                lines += cd.overview_lines(self.overview)
+            else:
+                lines.append(f"Overview of the {len(self.files)} files: computed when the Files or Text report tab is opened.")
+            lines += ["", "=" * 100, f"{self.path if self.bounds else os.path.basename(self.path)}:", ""]
+        if self.rows:
+            lines += cd.summary(self._analysed(), len(self.data), self.cadu_len, max_listed=10 ** 9,
+                                all_rows=self.rows, packets=self.packets,
+                                checked_apids=getattr(self, "_checked", None), unit=self._unit())
+        else:
+            lines.append("The file is shorter than one transfer frame." if self.frame_length
+                         else "No sync marker 1ACFFC1D found.")
+        self._set_text(self.summary_text, lines)
 
     def refresh(self, progress: bool = False) -> None:
         """Summary and frame table of the frames analysed (without the uncorrectable ones when excluded)."""
