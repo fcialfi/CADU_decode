@@ -59,9 +59,11 @@ def test_summary_of_virtual_channels(tmp_path, capsys):
     section = text.split("Virtual channels:")[1].split("idle: FHP")[0]
     vc_lines = {line.split()[0]: line.split() for line in section.splitlines()
                 if line.startswith("  ") and line.split() and line.split()[0] in ("1", "7")}
-    # VC, frames, share, %, idle, packet start, no header, first, last, jumps, missing, RS corrected
-    assert vc_lines["1"][1:2] + vc_lines["1"][4:] == ["3", "0", "2", "1", "0", "3", "1", "1", "0"]
-    assert vc_lines["7"][1:2] + vc_lines["7"][4:] == ["2", "2", "0", "0", "0", "1", "0", "0", "0"]
+    # VC, frames, share, %, MB, idle, packet start, no header, first, last, jumps, missing, RS corrected
+    assert vc_lines["1"][1:2] + vc_lines["1"][4:] == ["3", "0.00", "0", "2", "1", "0", "3", "1", "1", "0"]
+    assert vc_lines["7"][1:2] + vc_lines["7"][4:] == ["2", "0.00", "2", "0", "0", "0", "1", "0", "0", "0"]
+    assert cd.virtual_channel_table([{"vcid": 3, "vc_count": k, "first_header_pointer": 0x7FF}
+                                     for k in range(1000)], 1279)[1][3] == "1.28"   # 1000 x 1279 bytes
     rows = [dict(offset=o, **f) for o, f in cd.decode(path.read_bytes())]
     assert cd._counter_gaps([255, 0, 2]) == (1, 1)  # wrap at 256
     assert len(cd.frame_lines(rows)) == 6

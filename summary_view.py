@@ -202,11 +202,12 @@ class SummaryView(Page):
                      "click to open the CADU.", bg=BG, fg=MUTED, font=self.f_small).pack(anchor="w", padx=16)
 
         # Virtual channels, from the good frames (the header of an uncorrectable frame is unreliable).
-        self._section("Virtual channels", "idle: FHP 7FE; packet start: a packet header in the frame; "
+        self._section("Virtual channels", f"MB: size in the file ({cadu_len} bytes per frame, 1 MB = 10^6 bytes); "
+                      "idle: FHP 7FE; packet start: a packet header in the frame; "
                       "no header: FHP 7FF" + ("; uncorrectable frames not counted" if len(good) < len(rows) else ""))
         if good:
-            table = [(row[0], f"{row[1]:,}", *row[2:]) for row in cd.virtual_channel_table(good)[1:]]
-            self._table((("VC", 50), ("Frames", 80), ("Share", 70), ("Idle", 60), ("Packet start", 95),
+            table = [(row[0], f"{row[1]:,}", *row[2:]) for row in cd.virtual_channel_table(good, cadu_len)[1:]]
+            self._table((("VC", 50), ("Frames", 80), ("Share", 70), ("MB", 70), ("Idle", 60), ("Packet start", 95),
                          ("No header", 80), ("VCFC first", 80), ("VCFC last", 80), ("Jumps", 60),
                          ("Missing", 70), ("RS corrected", 95)), table)
             tk.Label(self.page, text=f"Master channel counter: {good[0]['mc_count']} → {good[-1]['mc_count']}, "
