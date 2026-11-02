@@ -255,7 +255,7 @@ class CaduWindow:
         titles.pack(side=tk.LEFT, padx=(16, 0))
         tk.Label(titles, text=APP_NAME, bg=HEADER_BG, fg=HEADER_FG,
                  font=(family, 15, "bold")).pack(anchor="w")
-        tk.Label(titles, text=f"Version {APP_VERSION}  ·  CCSDS TM CADUs: frames, Reed-Solomon, packets",
+        tk.Label(titles, text=f"Version {APP_VERSION}  ·  CCSDS TM CADUs and transfer frames: frames, Reed-Solomon, packets",
                  bg=HEADER_BG, fg=HEADER_FG_MUTED, font=(family, 9)).pack(anchor="w")
         for text, command in (("Exit", self.exit_app), ("About", self.show_about)):
             tk.Button(header, text=text, command=command, bg=HEADER_HOVER, fg=HEADER_FG,
@@ -269,7 +269,7 @@ class CaduWindow:
 
     def show_about(self) -> None:
         """Version, author and licence of the program (About button and F1)."""
-        lines = [f"{APP_NAME} {APP_VERSION}", "Decoder of CCSDS TM CADUs: transfer frames, Reed-Solomon, packets",
+        lines = [f"{APP_NAME} {APP_VERSION}", "Decoder of CCSDS TM CADUs and transfer frames: frames, Reed-Solomon, packets",
                  "", f"Author: {APP_AUTHOR}", "Copyright © 2026 Fabio Cialfi (Exostaff). All rights reserved."]
         license_text = self.license_status.summary()
         if license_text:
@@ -283,7 +283,7 @@ class CaduWindow:
         self.root.destroy()
 
     def open_file(self) -> None:
-        path = filedialog.askopenfilename(title="Open a file of CADUs",
+        path = filedialog.askopenfilename(title="Open a file of CADUs or transfer frames",
                                           filetypes=[("All files", "*.*"), ("Binary", "*.bin *.dat *.raw")])
         if path:
             self.load(path)
@@ -550,7 +550,7 @@ class CaduWindow:
     def export_packets(self) -> None:
         """Packets of each APID to <folder>/apid_NNNN.bin, and their list to packets.csv."""
         if not self.rows:
-            messagebox.showinfo("Export packets", "Open a file of CADUs first.")
+            messagebox.showinfo("Export packets", "Open a file first.")
             return
         folder = filedialog.askdirectory(title="Folder for the packets (one .bin file per APID)",
                                          mustexist=False)
@@ -577,7 +577,7 @@ class CaduWindow:
 
     def export_csv(self) -> None:
         if not self.rows:
-            messagebox.showinfo("Export CSV", "Open a file of CADUs first.")
+            messagebox.showinfo("Export CSV", "Open a file first.")
             return
         path = filedialog.asksaveasfilename(title="Export the frames", defaultextension=".csv",
                                             filetypes=[("CSV", "*.csv")])

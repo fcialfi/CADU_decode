@@ -134,7 +134,7 @@ class SummaryView(Page):
         # APIDs whose sequence count continuity is checked (text, e.g. "100, 15-16"); on_check() applies it.
         self.check_var = check_var or tk.StringVar(value=cd.DEFAULT_CHECKED_APIDS)
         self.on_check = on_check
-        self._message("Open a file of CADUs to see its summary.")
+        self._message("Open a file of CADUs or of transfer frames to see its summary.")
 
     def update_view(self, rows, all_rows, data_len, cadu_len, packets=None, unit="CADUs"):
         """Fill the page: ``rows`` analysed, ``all_rows`` every CADU of the file, ``packets`` the packet
