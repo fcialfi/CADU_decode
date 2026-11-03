@@ -706,6 +706,7 @@ def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool =
     sids = {}
     services = {}
     all_times = []  # packet times (CUC) of the file
+    streams = {}  # packet times of each stream: APID, service, subtype and SID
     for vc, apid, flags, seq, length, sec, frame, chain, _, pus in iter_packets(
             data, rows, interleave, randomized, fecf, vc_stats=vcs, progress=progress, frame_length=frame_length):
         if apid != IDLE_APID:
@@ -722,6 +723,7 @@ def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool =
             if "time" in pus:
                 sv["_times"].append(pus["time"])
                 all_times.append(pus["time"])
+                streams.setdefault((apid, pus["service"], pus["subtype"], pus.get("sid")), []).append(pus["time"])
         if "sid" in pus:
             key = (apid, pus["service"], pus["subtype"], pus["sid"], vc)
             h = sids.get(key)
@@ -784,10 +786,66 @@ def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool =
     table = sorted(apids.values(), key=lambda a: (a["apid"], a["vc"]))
     for a in table:
         del a["_chain"], a["_frame"]
-    span, breaks = time_coverage(all_times)
+    span, breaks, outside = periodic_coverage(streams)
+    if span is None:  # no periodic stream: every packet time
+        span, breaks = time_coverage(all_times)
+        outside = 0
     return {"vcs": vcs, "apids": table, "gaps": gaps, "sids": sid_table(sids.values()),
-            "services": service_table(services.values(), span), "span": span, "time_breaks": breaks,
+            "services": service_table(services.values(), span), "span": span, "time_breaks": breaks, "outside": outside,
             "first_time": min(all_times) if all_times else None, "last_time": max(all_times) if all_times else None}
+
+
+def _periodic_intervals(times, min_packets: int = 10, tolerance: float = 0.5):
+    """The intervals [a, b] between consecutive times of a periodic stream (most intervals within ``tolerance``
+    of the median; at least ``min_packets`` packets), the longer ones (pauses) left out. None if not periodic."""
+    import statistics
+
+    times = sorted(set(times))
+    if len(times) < min_packets:
+        return None
+    steps = [b - a for a, b in zip(times, times[1:])]
+    period = statistics.median(steps)
+    regular = sum(1 for x in steps if abs(x - period) <= tolerance * period)
+    if period <= 0 or regular < 0.8 * len(steps):
+        return None
+    return [(a, b) for a, b in zip(times, times[1:]) if b - a <= (1 + tolerance) * period]
+
+
+SPORADIC_SERVICES = {1, 5}  # request verification and event reporting: never periodic
+
+
+def periodic_coverage(streams):
+    """(seconds covered, pauses, packets outside) from the periodic packet streams (e.g. the housekeeping reports):
+    the union of the intervals between their consecutive packets. Sparse packets (events, verifications) do not
+    stretch it: a dump may carry the events of an earlier orbit, with older times. ``outside``: the packets
+    whose time is in no covered interval. (None, 0, 0) without a periodic stream."""
+    intervals = []
+    periodic = set()
+    for key, times in streams.items():
+        if key[1] in SPORADIC_SERVICES:
+            continue
+        found = _periodic_intervals(times)
+        if found:
+            intervals += found
+            periodic.add(key)
+    if not intervals:
+        return None, 0, 0
+    intervals.sort()
+    merged = [list(intervals[0])]
+    for a, b in intervals[1:]:
+        if a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    starts = [a for a, _ in merged]
+    import bisect
+
+    def inside(t):
+        k = bisect.bisect_right(starts, t) - 1
+        return k >= 0 and t <= merged[k][1]
+
+    outside = sum(1 for times in streams.values() for t in times if not inside(t))
+    return sum(b - a for a, b in merged), len(merged) - 1, outside
 
 
 def time_coverage(times, min_break: float = 60.0, factor: float = 20.0):
@@ -950,9 +1008,12 @@ def coverage_text(stats: dict, epoch=None) -> str:
     if not span:
         return "no packet time: rates not computed"
     text = (f"packet times {time_text(stats.get('first_time'), epoch)} to {time_text(stats.get('last_time'), epoch)}; "
-            f"rates over the {span:.0f} s ({span / 60:.1f} min) the packet times cover")
+            f"rates over the {span:.0f} s ({span / 60:.1f} min) covered by the periodic packets")
     if stats.get("time_breaks"):
-        text += f" ({stats['time_breaks']} breaks in the times left out)"
+        text += f" ({stats['time_breaks']} pauses left out)"
+    if stats.get("outside"):
+        text += (f"; {stats['outside']} packets (e.g. events of an earlier orbit) have times outside it: counted in the "
+                 "bytes, not in the time")
     return text
 
 
@@ -1078,6 +1139,11 @@ def unaccounted_text(info: dict, unit: str = "CADUs") -> str:
     """One line on the bytes in no CADU or frame ("" when there are none)."""
     if not info["total"]:
         return ""
+    sizes = {n for _, n in info["gaps"]}
+    if len(sizes) == 1 and len(info["gaps"]) >= 2 and not info["lead"] and info["tail"] in (0, *sizes):
+        size = sizes.pop()
+        return (f"every {unit[:-1].lower()} is followed by {size} bytes ({info['total']} in all): a fixed block "
+                "added by the ground station or the recorder (e.g. reception time and quality), not telemetry")
     parts = []
     if info["lead"]:
         parts.append(f"{info['lead']} at the start")

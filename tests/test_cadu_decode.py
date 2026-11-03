@@ -481,6 +481,7 @@ def test_packets_by_service(capsys, tmp_path):
     assert cd.main([str(path)]) == 0
     text = capsys.readouterr().out.split("Packets by PUS service")[1].split("Housekeeping reports by SID")[0]
     assert "rates over the 59 s" in text and "By APID and service:" in text
+    assert "covered by the periodic packets" in text
     assert "packet times 1000.000 s to 1059.000 s" in text
     assert any(line.split()[:2] == ["2,9", "15"] for line in text.splitlines())
 
@@ -510,7 +511,7 @@ def test_rates_ignore_breaks_in_the_times():
     stream.append(_pus_packet(46, 100, 100, 3, 25, 1000 + 86400 * 30, sid=5))   # a wrong time, 30 days later
     data = b"".join(_frames_from_stream(stream, 1, 0, 0))
     stats = cd.packet_statistics(data, cd.decode_all(data))
-    assert (stats["span"], stats["time_breaks"]) == (99, 1)
+    assert (stats["span"], stats["outside"]) == (99, 1)   # the packet with the wrong time is left out
     (hk,) = [v for v in stats["services"] if v["service"] == 3]
     assert hk["bytes_per_s"] == 101 * 100 / 99
     assert cd.time_coverage([]) == (None, 0) and cd.time_coverage([5, 5]) == (None, 0)
@@ -540,3 +541,27 @@ def test_export_tables(tmp_path, capsys):
     assert "1980-01-06 00:16:40.000" in sids[1]   # first packet time 1000 s from the GPS epoch
     totals = (out / "service_totals.csv").read_text()
     assert "\n2,9,15,30," in totals and "\n3,25,46,30," in totals   # service and subtype in two columns
+
+
+def test_station_block_after_every_cadu():
+    block = bytes(48)
+    data = b"".join(_cadu(k, k) + block for k in range(5))
+    rows = cd.decode_all(data)
+    assert len(rows) == 5
+    text = cd.unaccounted_text(cd.unaccounted_bytes(rows, len(data), 1279))
+    assert text.startswith("every cadu is followed by 48 bytes (240 in all)")
+
+
+def test_events_of_an_earlier_orbit_do_not_stretch_the_rates():
+    stream = []
+    for k in range(40):                                   # an earlier orbit: events only, every 30 s
+        stream.append(_pus_packet(35, k, 80, 5, 1, k * 30))
+    for k in range(600):                                  # this orbit: HK every second, 2,9 every second
+        stream.append(_pus_packet(46, k, 262, 3, 25, 5000 + k, sid=5))
+        stream.append(_pus_packet(15, k, 164, 2, 9, 5000 + k))
+    data = b"".join(_frames_from_stream(stream, 1, 0, 0))
+    stats = cd.packet_statistics(data, cd.decode_all(data))
+    assert (stats["span"], stats["outside"]) == (599, 40)
+    total = sum(v["bytes"] for v in stats["services"])
+    assert abs(sum(v["bytes_per_s"] for v in stats["services"]) - total / 599) < 1e-6
+    assert "40 packets (e.g. events of an earlier orbit) have times outside it" in cd.coverage_text(stats)

@@ -13,7 +13,8 @@ Per ogni CADU lo script:
 
 - si sincronizza sul sync marker (se tra due CADU c'è altro, salta al marker successivo); il riepilogo dice quanti
   byte del file non sono in nessun CADU (o transfer frame): all'inizio, tra un CADU e l'altro (in quanti tratti e il
-  primo offset) e in fondo;
+  primo offset) e in fondo. Se dopo ogni CADU c'è un blocco della stessa lunghezza (per esempio i 48 byte di
+  annotazione che una stazione di terra aggiunge a ogni CADU, con tempo di ricezione e qualità), lo dice così;
 - de-randomizza il codeblock (sequenza h(x) = x⁸ + x⁷ + x⁵ + x³ + 1, che inizia FF 48 0E C0 9A …) se è
   randomizzato. Molti ricevitori salvano i CADU già de-randomizzati: lo script lo riconosce da solo provando
   le due letture sui primi 200 CADU (versione del frame 0 e master channel counter che sale di 1). Letti nel modo
@@ -169,10 +170,11 @@ La sezione **Packets by PUS service** dice quanto pesa ogni servizio nel file (g
 - per **APID e servizio**: pacchetti, byte, quota, lunghezza, periodo (mediana degli intervalli tra i tempi dei
   pacchetti: ha senso per i pacchetti periodici), B/s e MB al giorno.
 
-B/s e MB al giorno sono i byte diviso il tempo coperto dai tempi dei pacchetti: valgono per i pacchetti periodici e
-per quelli sporadici (eventi, verifiche). Il tempo coperto è la somma degli intervalli tra tempi consecutivi, senza
-le **pause** (intervalli oltre 20 volte l'intervallo mediano e oltre 60 s: il passaggio dal real-time a un dump, o un
-pacchetto con il tempo sbagliato), che sono contate e segnalate; un solo tempo sbagliato non falsa quindi i rate.
+B/s e MB al giorno sono i byte diviso il tempo coperto dai **pacchetti periodici** (i report HK, i 2,9 e gli
+altri flussi regolari; non le verifiche 1,x e gli eventi 5,x, che sono sporadici): l'unione degli intervalli tra i
+loro pacchetti consecutivi, senza le pause. Valgono per i pacchetti periodici e per quelli sporadici. Così non contano
+i tempi dei pacchetti fuori da quel periodo: un dump può contenere anche gli eventi dell'orbita precedente (con tempi
+più vecchi), o un pacchetto con il tempo sbagliato; il riepilogo dice quanti sono (contati nei byte, non nel tempo).
 Il riepilogo dà anche il primo e l'ultimo tempo dei pacchetti: in secondi, oppure come data con `--epoch`
 (epoca del tempo CUC: `gps` 1980-01-06, `tai` 1958-01-01, `unix`, `2000` o una data come `2000-01-01`; con il
 P-field `2F` l'epoca è definita dalla missione: va presa dall'ICD; le date sono nella scala di tempo dell'epoca,
