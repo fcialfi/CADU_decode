@@ -40,7 +40,9 @@ class Page(ttk.Frame):
         self.page = tk.Frame(self.canvas, bg=BG)
         self._window = self.canvas.create_window(0, 0, window=self.page, anchor="nw")
         self.page.bind("<Configure>", lambda _e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._window, width=e.width))
+        self._wrapped = []
+        self.canvas.bind("<Configure>", lambda e: (self.canvas.itemconfigure(self._window, width=e.width),
+                                                   self._rewrap(e.width)))
         # The mouse wheel scrolls the page under the pointer.
         self.canvas.bind("<Enter>", lambda _e: self._bind_wheel())
         self.canvas.bind("<Leave>", lambda _e: self._unbind_wheel())
@@ -71,6 +73,7 @@ class Page(ttk.Frame):
     def _clear(self):
         for child in self.page.winfo_children():
             child.destroy()
+        self._wrapped = []
 
     def _message(self, text):
         self._clear()
@@ -79,9 +82,21 @@ class Page(ttk.Frame):
     def _section(self, title, note=""):
         box = tk.Frame(self.page, bg=BG)
         box.pack(fill=tk.X, padx=16, pady=(14, 4))
-        tk.Label(box, text=title, bg=BG, fg=TEXT, font=self.f_title).pack(side=tk.LEFT)
+        tk.Label(box, text=title, bg=BG, fg=TEXT, font=self.f_title).pack(anchor="w")
         if note:
-            tk.Label(box, text="  " + note, bg=BG, fg=MUTED, font=self.f_small).pack(side=tk.LEFT)
+            self._wrapping(tk.Label(box, text=note, bg=BG, fg=MUTED, font=self.f_small, justify="left")).pack(
+                anchor="w")
+
+    def _wrapping(self, label):
+        """A label that wraps to the width of the page (long notes are not cut on the right)."""
+        label.configure(wraplength=max(self.canvas.winfo_width() - 60, 400))
+        self._wrapped.append(label)
+        return label
+
+    def _rewrap(self, width):
+        for label in self._wrapped:
+            if label.winfo_exists():
+                label.configure(wraplength=max(width - 60, 400))
 
     def _card(self, parent=None):
         card = tk.Frame(parent or self.page, bg=CARD, highlightthickness=1, highlightbackground=BORDER)
@@ -114,22 +129,27 @@ class Page(ttk.Frame):
             tree.move(item, "", index)
         tree._sorted = (column, reverse)
 
+    MAX_ROWS = 30  # rows shown before a table gets its own scroll bar
+
     def _table(self, columns, rows, height=None, goto_column=None, anchors=None):
         """A Treeview in a card; ``goto_column``: index of the CADU number (double click opens it)."""
         card = self._card()
         card.pack(fill=tk.X, padx=16, pady=(0, 4))
         heading_font = tkfont.nametofont("TkHeadingFont")
         names = [str(k) for k in range(len(columns))] + ["fill"]  # an empty last column takes the spare width
-        tree = ttk.Treeview(card, columns=names, show="headings", height=height or min(max(len(rows), 1), 10))
+        tree = ttk.Treeview(card, columns=names, show="headings", height=height or min(max(len(rows), 1), self.MAX_ROWS))
+        body_font = tkfont.nametofont("TkDefaultFont")
         for k, (heading, width) in enumerate(columns):
             tree.heading(str(k), text=heading, command=lambda c=k: self._sort(tree, c))
             anchor = (anchors or {}).get(k, "e")
-            tree.column(str(k), width=max(width, heading_font.measure(heading) + 20), anchor=anchor, stretch=False)
+            content = max((body_font.measure(str(row[k])) for row in rows[:2000] if k < len(row)), default=0)
+            tree.column(str(k), width=min(max(width, heading_font.measure(heading) + 20, content + 16), 900),
+                        anchor=anchor, stretch=False)
         tree.heading("fill", text="")
         tree.column("fill", width=10, stretch=True)
         for row in rows:
             tree.insert("", tk.END, values=tuple(row) + ("",))
-        if len(rows) > (height or 10):
+        if len(rows) > (height or self.MAX_ROWS):
             sb = ttk.Scrollbar(card, orient=tk.VERTICAL, command=tree.yview)
             tree.configure(yscrollcommand=sb.set)
             sb.pack(side=tk.RIGHT, fill=tk.Y)
@@ -157,7 +177,15 @@ class SummaryView(Page):
         self.on_check = on_check
         self._message("Open a file of CADUs or of transfer frames to see its summary.")
 
-    def update_view(self, rows, all_rows, data_len, cadu_len, packets=None, unit="CADUs", epoch=None):
+    def update_view(self, *args, **kwargs):
+        """Fill the page (see _update_view); the notes then wrap to the width of the page."""
+        self._update_view(*args, **kwargs)
+        for child in self.page.winfo_children():
+            if isinstance(child, tk.Label) and child.cget("font") == str(self.f_small):
+                child.configure(justify="left")
+                self._wrapping(child)
+
+    def _update_view(self, rows, all_rows, data_len, cadu_len, packets=None, unit="CADUs", epoch=None):
         """Fill the page: ``rows`` analysed, ``all_rows`` every CADU of the file, ``packets`` the packet
         statistics (cadu_decode.packet_statistics), ``epoch`` of the packet times (None: seconds)."""
         self.epoch = epoch
@@ -386,7 +414,7 @@ class SummaryView(Page):
         self._table((("Service", 80), ("APIDs", 220), ("Packets", 90), ("Bytes", 110), ("Share", 70), ("B/s", 80),
                      ("MB/day", 80)), rows, anchors={0: "w", 1: "w"})
         self._section("Packets by APID and service", "period: median interval of the packet times (periodic "
-                      "packets); B/s and MB/day: bytes over the time the packet times cover")
+                      "packets); B/s and MB/day: bytes over the time covered by the periodic packets")
         rows = []
         for v in services:
             length = str(v["min_length"]) if v["min_length"] == v["max_length"] else \

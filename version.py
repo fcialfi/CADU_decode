@@ -6,7 +6,7 @@ number (git tag v1.0.0).
 """
 
 APP_NAME = "CCSDS TM Decoder"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 
 # Author of the program, shown in the window header, the About box and --version.
 APP_AUTHOR = "Fabio Cialfi"

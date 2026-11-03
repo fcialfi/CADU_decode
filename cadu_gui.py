@@ -88,7 +88,10 @@ class CaduWindow:
         self.packets = None
         self.license_status = license_status or licensing.check_license()
         root.title(f"{APP_NAME} {APP_VERSION}")
-        root.geometry("1320x880")
+        # 1320 x 880, or less on a smaller screen (taskbar and title bar left visible)
+        width = min(1320, root.winfo_screenwidth() - 40)
+        height = min(880, root.winfo_screenheight() - 100)
+        root.geometry(f"{width}x{height}+{max((root.winfo_screenwidth() - width) // 2, 0)}+10")
         _set_icon(root)
         self.mono = tkfont.nametofont("TkFixedFont").copy()
         self.mono.configure(size=10)
@@ -141,12 +144,6 @@ class CaduWindow:
         menu.add_command(label="Packet tables to CSV…", command=self.export_tables)
         export["menu"] = menu
         export.pack(side=tk.RIGHT)
-        epoch = ttk.Combobox(bar, textvariable=self.epoch_var, width=6,
-                             values=("none", "gps", "tai", "unix", "2000"))
-        epoch.pack(side=tk.RIGHT, padx=(4, 12))
-        epoch.bind("<<ComboboxSelected>>", lambda _e: self.refresh_summary())
-        epoch.bind("<Return>", lambda _e: self.refresh_summary())
-        ttk.Label(bar, text="Time epoch").pack(side=tk.RIGHT)
         root.bind_all("<Control-q>", lambda _e: self.exit_app())
         root.bind_all("<F1>", lambda _e: self.show_about())
         root.protocol("WM_DELETE_WINDOW", self.exit_app)
@@ -159,6 +156,13 @@ class CaduWindow:
         self.choice_label = ttk.Label(status, text="File")
         self.choice_box = ttk.Combobox(status, textvariable=self.choice_var, width=60, state="readonly")
         self.choice_box.bind("<<ComboboxSelected>>", lambda _e: self.select_file())
+        # Epoch of the packet times (CUC), to show them as dates; on the file line, where there is room.
+        epoch = ttk.Combobox(status, textvariable=self.epoch_var, width=6,
+                             values=("none", "gps", "tai", "unix", "2000"))
+        epoch.pack(side=tk.RIGHT, padx=(4, 0))
+        epoch.bind("<<ComboboxSelected>>", lambda _e: self.refresh_summary())
+        epoch.bind("<Return>", lambda _e: self.refresh_summary())
+        ttk.Label(status, text="Time epoch").pack(side=tk.RIGHT)
         self.file_label = ttk.Label(status, textvariable=self.file_var)
         self.file_label.pack(side=tk.LEFT)
         # Progress of the loading, shown only while a file is read and analysed.
