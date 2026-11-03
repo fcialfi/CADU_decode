@@ -676,8 +676,26 @@ def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool =
     gaps = []
     seqs = {}
     sids = {}
+    services = {}
+    times = [None, None]  # first and last packet time (CUC) of the file
     for vc, apid, flags, seq, length, sec, frame, chain, _, pus in iter_packets(
             data, rows, interleave, randomized, fecf, vc_stats=vcs, progress=progress, frame_length=frame_length):
+        if apid != IDLE_APID:
+            key = (apid, pus.get("service"), pus.get("subtype"), vc)
+            sv = services.get(key)
+            if sv is None:
+                sv = services[key] = {"apid": apid, "service": pus.get("service"), "subtype": pus.get("subtype"),
+                                      "vc": vc, "packets": 0, "bytes": 0, "min_length": length,
+                                      "max_length": length, "_times": []}
+            sv["packets"] += 1
+            sv["bytes"] += length
+            sv["min_length"] = min(sv["min_length"], length)
+            sv["max_length"] = max(sv["max_length"], length)
+            if "time" in pus:
+                sv["_times"].append(pus["time"])
+                t = pus["time"]
+                times[0] = t if times[0] is None else min(times[0], t)
+                times[1] = t if times[1] is None else max(times[1], t)
         if "sid" in pus:
             key = (apid, pus["service"], pus["subtype"], pus["sid"], vc)
             h = sids.get(key)
@@ -740,7 +758,54 @@ def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool =
     table = sorted(apids.values(), key=lambda a: (a["apid"], a["vc"]))
     for a in table:
         del a["_chain"], a["_frame"]
-    return {"vcs": vcs, "apids": table, "gaps": gaps, "sids": sid_table(sids.values())}
+    span = times[1] - times[0] if times[0] is not None and times[1] > times[0] else None
+    return {"vcs": vcs, "apids": table, "gaps": gaps, "sids": sid_table(sids.values()),
+            "services": service_table(services.values(), span), "span": span}
+
+
+def _median_step(times):
+    """Median interval of the packet times (None with fewer than two different times)."""
+    import statistics
+
+    times = sorted(set(times))
+    steps = [b - a for a, b in zip(times, times[1:])]
+    return statistics.median(steps) if steps else None
+
+
+def service_table(items, span) -> list[dict]:
+    """The packets per APID, PUS service and VC (idle packets left out): bytes, share of all the bytes, period
+    (median interval of the packet times) and rate. The rate is the bytes over the time the file covers
+    (``span``: first to last packet time, in seconds), right for periodic and sporadic packets alike."""
+    items = sorted(items, key=lambda v: (v["apid"], v["service"] is None, v["service"] or 0, v["subtype"] or 0,
+                                         v["vc"]))
+    total = sum(v["bytes"] for v in items)
+    for v in items:
+        v["period"] = _median_step(v.pop("_times"))
+        v["share"] = v["bytes"] / total if total else 0
+        v["bytes_per_s"] = v["bytes"] / span if span else None
+        v["mb_per_day"] = v["bytes_per_s"] * 86400 / 1e6 if span else None
+    return items
+
+
+def service_totals(services) -> list[dict]:
+    """The packets of each PUS service (all the APIDs together), largest first."""
+    totals = {}
+    for v in services:
+        key = (v["service"], v["subtype"])
+        t = totals.setdefault(key, {"service": v["service"], "subtype": v["subtype"], "apids": set(), "packets": 0,
+                                    "bytes": 0, "share": 0, "bytes_per_s": None, "mb_per_day": None})
+        t["apids"].add(v["apid"])
+        t["packets"] += v["packets"]
+        t["bytes"] += v["bytes"]
+        t["share"] += v["share"]
+        if v["bytes_per_s"] is not None:
+            t["bytes_per_s"] = (t["bytes_per_s"] or 0) + v["bytes_per_s"]
+            t["mb_per_day"] = (t["mb_per_day"] or 0) + v["mb_per_day"]
+    return sorted(totals.values(), key=lambda t: -t["bytes"])
+
+
+def _service_name(service, subtype) -> str:
+    return "–" if service is None else f"{service},{subtype}"
 
 
 def sid_table(items) -> list[dict]:
@@ -827,7 +892,43 @@ def packet_lines(stats: dict, max_listed: int = 50, checked=None) -> list[str]:
         lines += ["    " + line for line in _table(table, last_left=True)]
         if len(gaps) > max_listed:
             lines.append(f"    ... {len(gaps) - max_listed} more")
+    lines += service_lines(stats.get("services", []), stats.get("span"))
     lines += sid_lines(stats.get("sids", []))
+    return lines
+
+
+def _rate_text(value, fmt) -> str:
+    return "–" if value is None else format(value, fmt)
+
+
+def service_lines(services, span) -> list[str]:
+    """Text of the packets per PUS service: totals per service, then per APID and service."""
+    lines = ["", "Packets by PUS service (idle packets left out; –: no PUS data field header, e.g. time reports):"]
+    if not services:
+        return lines + ["  none"]
+    covered = (f"rates over the {span:.0f} s ({span / 60:.1f} min) between the first and last packet time"
+               if span else "no packet time: rates not computed")
+    table = [("service", "APIDs", "packets", "bytes", "share", "B/s", "MB/day")]
+    for t in service_totals(services):
+        table.append((_service_name(t["service"], t["subtype"]), _apid_text(t["apids"]), t["packets"], t["bytes"],
+                      f"{100 * t['share']:.1f} %", _rate_text(t["bytes_per_s"], ".1f"),
+                      _rate_text(t["mb_per_day"], ".3f")))
+    total = sum(v["bytes"] for v in services)
+    table.append(("total", "", sum(v["packets"] for v in services), total, "100.0 %",
+                  _rate_text(total / span if span else None, ".1f"),
+                  _rate_text(total / span * 86400 / 1e6 if span else None, ".3f")))
+    lines += ["  " + line for line in _table(table, left=2)]
+    lines.append(f"  {covered}; 1 MB = 10^6 bytes")
+    lines += ["", "  By APID and service:"]
+    table = [("APID", "service", "VC", "packets", "bytes", "share", "length", "period s", "B/s", "MB/day")]
+    for v in services:
+        length = str(v["min_length"]) if v["min_length"] == v["max_length"] else \
+            f"{v['min_length']}-{v['max_length']}"
+        table.append((v["apid"], _service_name(v["service"], v["subtype"]), v["vc"], v["packets"], v["bytes"],
+                      f"{100 * v['share']:.1f} %", length, _period_text(v["period"]),
+                      _rate_text(v["bytes_per_s"], ".1f"), _rate_text(v["mb_per_day"], ".3f")))
+    lines += ["    " + line for line in _table(table)]
+    lines.append("    period: median interval of the packet times (meaningful for periodic packets only)")
     return lines
 
 

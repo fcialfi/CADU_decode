@@ -452,3 +452,33 @@ def test_sids_of_the_hk_reports(tmp_path, capsys):
 
     shown = "\n".join(cd.show_cadu(1, cd.decode_all(data)[0], data, 5, True, False, dump=False))
     assert "service  SID" in shown and " 3,25    5" in shown
+
+
+def test_packets_by_service(capsys, tmp_path):
+    stream = []
+    for t in range(60):
+        stream.append(_pus_packet(46, t, 264, 3, 25, 1000 + t, sid=5))      # 3,25 every second
+        stream.append(_pus_packet(15, 2 * t, 164, 2, 9, 1000 + t))          # 2,9 twice a second
+        stream.append(_pus_packet(15, 2 * t + 1, 100, 2, 9, 1000 + t))
+        if t % 20 == 0:
+            stream.append(_pus_packet(30, t, 40, 5, 1, 1000 + t))           # sporadic event
+    stream.append(_packet(0, 0, 16))                                          # time report, no PUS header
+    data = b"".join(_frames_from_stream(stream, 1, 0, 0))
+    stats = cd.packet_statistics(data, cd.decode_all(data))
+    assert stats["span"] == 59
+    by = {(v["apid"], v["service"], v["subtype"]): v for v in stats["services"]}
+    hk, dev, ev = by[(46, 3, 25)], by[(15, 2, 9)], by[(30, 5, 1)]
+    assert (hk["packets"], hk["bytes"], hk["period"]) == (60, 60 * 264, 1)
+    assert (dev["packets"], dev["bytes"], dev["min_length"], dev["max_length"]) == (120, 60 * 264, 100, 164)
+    assert dev["bytes_per_s"] == 60 * 264 / 59 and ev["packets"] == 3 and ev["period"] == 20
+    assert by[(0, None, None)]["period"] is None                              # no time: no period
+    assert abs(sum(v["share"] for v in stats["services"]) - 1) < 1e-9
+    totals = cd.service_totals(stats["services"])
+    assert [(t["service"], t["subtype"]) for t in totals][:2] in ([(3, 25), (2, 9)], [(2, 9), (3, 25)])
+
+    path = tmp_path / "cadu.bin"
+    path.write_bytes(data)
+    assert cd.main([str(path)]) == 0
+    text = capsys.readouterr().out.split("Packets by PUS service")[1].split("Housekeeping reports by SID")[0]
+    assert "rates over the 59 s" in text and "By APID and service:" in text
+    assert any(line.split()[:2] == ["2,9", "15"] for line in text.splitlines())

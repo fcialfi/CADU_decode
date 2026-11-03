@@ -323,7 +323,37 @@ class SummaryView(Page):
                           ", ".join(f"VC {v}" for v in g["found_in"]) or "–") for g in gaps],
                         goto_column=6, anchors={7: "w"})
 
+        self._services(stats.get("services", []), stats.get("span"))
         self._sids(stats.get("sids", []))
+
+    def _services(self, services, span):
+        """The packets per PUS service: totals per service, then per APID and service."""
+        covered = (f"rates over the {span:.0f} s ({span / 60:.1f} min) between the first and last packet time"
+                   if span else "no packet time: rates not computed")
+        self._section("Packets by PUS service", f"idle packets left out; –: no PUS header (e.g. time reports); {covered}")
+        if not services:
+            tk.Label(self.page, text="No packets.", bg=BG, fg=MUTED, font=self.f_small).pack(anchor="w", padx=16)
+            return
+        rows = [(cd._service_name(t["service"], t["subtype"]), cd._apid_text(t["apids"]), f"{t['packets']:,}",
+                 f"{t['bytes']:,}", f"{100 * t['share']:.1f} %", cd._rate_text(t["bytes_per_s"], ",.1f"),
+                 cd._rate_text(t["mb_per_day"], ".3f")) for t in cd.service_totals(services)]
+        total = sum(v["bytes"] for v in services)
+        rows.append(("total", "", f"{sum(v['packets'] for v in services):,}", f"{total:,}", "100.0 %",
+                     cd._rate_text(total / span if span else None, ",.1f"),
+                     cd._rate_text(total / span * 86400 / 1e6 if span else None, ".3f")))
+        self._table((("Service", 80), ("APIDs", 220), ("Packets", 90), ("Bytes", 110), ("Share", 70), ("B/s", 80),
+                     ("MB/day", 80)), rows, anchors={0: "w", 1: "w"})
+        self._section("Packets by APID and service", "period: median interval of the packet times (periodic "
+                      "packets); B/s and MB/day: bytes over the time the file covers")
+        rows = []
+        for v in services:
+            length = str(v["min_length"]) if v["min_length"] == v["max_length"] else \
+                f"{v['min_length']}–{v['max_length']}"
+            rows.append((v["apid"], cd._service_name(v["service"], v["subtype"]), v["vc"], f"{v['packets']:,}",
+                         f"{v['bytes']:,}", f"{100 * v['share']:.1f} %", length, cd._period_text(v["period"]),
+                         cd._rate_text(v["bytes_per_s"], ",.1f"), cd._rate_text(v["mb_per_day"], ".3f")))
+        self._table((("APID", 60), ("Service", 70), ("VC", 50), ("Packets", 90), ("Bytes", 110), ("Share", 70),
+                     ("Length", 80), ("Period s", 80), ("B/s", 80), ("MB/day", 80)), rows)
 
     def _sids(self, sids):
         """The housekeeping structures (SIDs of the PUS-C 3,25 and 3,26 reports) with their period."""
