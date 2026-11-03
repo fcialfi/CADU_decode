@@ -136,7 +136,7 @@ class CaduWindow:
         self.exclude_box = ttk.Checkbutton(bar, text="Exclude uncorrectable frames", variable=self.exclude_var,
                                            command=self._exclude_changed)
         self.exclude_box.pack(side=tk.LEFT)
-        self.epoch_var = tk.StringVar(value="none")
+        self.epoch_var = tk.StringVar(value=cd.DEFAULT_EPOCH)
         export = ttk.Menubutton(bar, text="Export")
         menu = tk.Menu(export, tearoff=False)
         menu.add_command(label="Frames to CSV…", command=self.export_csv)
@@ -157,8 +157,8 @@ class CaduWindow:
         self.choice_box = ttk.Combobox(status, textvariable=self.choice_var, width=60, state="readonly")
         self.choice_box.bind("<<ComboboxSelected>>", lambda _e: self.select_file())
         # Epoch of the packet times (CUC), to show them as dates; on the file line, where there is room.
-        epoch = ttk.Combobox(status, textvariable=self.epoch_var, width=6,
-                             values=("none", "gps", "tai", "unix", "2000"))
+        epoch = ttk.Combobox(status, textvariable=self.epoch_var, width=8,
+                             values=("gps-utc", "gps", "tai", "unix", "2000", "none"))
         epoch.pack(side=tk.RIGHT, padx=(4, 0))
         epoch.bind("<<ComboboxSelected>>", lambda _e: self.refresh_summary())
         epoch.bind("<Return>", lambda _e: self.refresh_summary())
@@ -598,10 +598,11 @@ class CaduWindow:
         try:
             self._epoch = cd.parse_epoch(self.epoch_var.get())
         except ValueError:
-            messagebox.showerror("Time epoch", f"Not an epoch: {self.epoch_var.get()}\n\nnone, gps (1980-01-06), "
-                                 "tai (1958-01-01), unix, 2000, or a date such as 2000-01-01.")
-            self.epoch_var.set("none")
-            self._epoch = None
+            messagebox.showerror("Time epoch", f"Not an epoch: {self.epoch_var.get()}\n\ngps-utc (GPS epoch, dates in "
+                                 "UTC), gps (GPS time), tai (1958-01-01), unix, 2000, a date such as 2000-01-01, "
+                                 "or none (seconds).")
+            self.epoch_var.set(cd.DEFAULT_EPOCH)
+            self._epoch = cd.parse_epoch(cd.DEFAULT_EPOCH)
         self._fill_report()
         for view in (self.summary_view, self.packets_view):
             top = view.canvas.yview()[0]

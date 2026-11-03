@@ -175,13 +175,15 @@ altri flussi regolari; non le verifiche 1,x e gli eventi 5,x, che sono sporadici
 loro pacchetti consecutivi, senza le pause. Valgono per i pacchetti periodici e per quelli sporadici. Così non contano
 i tempi dei pacchetti fuori da quel periodo: un dump può contenere anche gli eventi dell'orbita precedente (con tempi
 più vecchi), o un pacchetto con il tempo sbagliato; il riepilogo dice quanti sono (contati nei byte, non nel tempo).
-Il riepilogo dà anche il primo e l'ultimo tempo dei pacchetti: in secondi, oppure come data con `--epoch`
-(epoca del tempo CUC: `gps` 1980-01-06, `tai` 1958-01-01, `unix`, `2000` o una data come `2000-01-01`; con il
-P-field `2F` l'epoca è definita dalla missione: va presa dall'ICD; le date sono nella scala di tempo dell'epoca,
-senza leap second). I pacchetti senza Data Field Header PUS (per
-esempio i time report dell'APID 0) hanno servizio "–" e nessun periodo. Serve per confrontare il volume reale con un
-budget di telemetria: per esempio quanto pesano i 2,9 (Physical Device Data) rispetto ai 3,25.
-Anche `--show`, il dettaglio del frame nella finestra e `packets.csv` danno servizio e SID di ogni pacchetto.
+Il riepilogo dà anche il primo e l'ultimo tempo dei pacchetti come date. Il tempo CUC è un conteggio di secondi da
+un'epoca che il pacchetto non dice (P-field `2F`: epoca definita dalla missione, dall'ICD); `--epoch` la sceglie:
+
+- `gps-utc` (default): epoca GPS (1980-01-06), date in **UTC**: il tempo GPS meno i leap second (18 s dal
+  2017-01-01). È l'epoca di AWS (verificata con il tempo di ricezione di un dump);
+- `gps`: epoca GPS, date in tempo GPS (18 s avanti rispetto a UTC);
+- `tai` (1958-01-01), `unix` (1970-01-01), `2000` (2000-01-01) o una data come `2000-01-01`: date nella scala di
+  tempo dell'epoca, senza leap second;
+- `none`: i secondi.
 
 `--export-packets cartella` scrive i pacchetti di ogni APID in `cartella/apid_NNNN.bin` (uno dopo l'altro, in
 ordine di arrivo) e l'elenco di tutti in `packets.csv` (con servizio, subtype, SID e tempo CUC); gli idle packet
@@ -222,7 +224,8 @@ salta la ricostruzione.
   più frequente e di quelle diverse, e dei frame non correggibili; doppio clic su una riga: apre il CADU;
 - scheda **Packets**: le tabelle dei pacchetti: per VC, per APID (in arancione gli APID con salti del sequence
   count), i salti senza frame persi, per servizio PUS e per APID e servizio (con i tempi dei pacchetti), e i SID;
-  **Time epoch**, sulla riga del nome del file, sceglie l'epoca per mostrare i tempi come date (come `--epoch`);
+  **Time epoch**, sulla riga del nome del file, sceglie l'epoca per mostrare i tempi come date (come `--epoch`,
+  default `gps-utc`);
 - in tutte le tabelle del riepilogo un clic sull'intestazione di una colonna ordina le righe (i numeri come numeri),
   un secondo clic inverte l'ordine;
 - le tabelle mostrano fino a 30 righe senza barra di scorrimento propria, le colonne sono larghe quanto il loro
@@ -304,7 +307,7 @@ python cadu_gui.py capture.bin                     # finestra
 python cadu_decode.py capture.bin --interleave 4   # altro interleaving (CADU di 4 + 255·I byte)
 python cadu_decode.py capture.bin --fecf           # frame con FECF (2 byte) in coda
 python cadu_decode.py capture.bin --randomization no   # forza: codeblock già de-randomizzato (yes: randomizzato)
-python cadu_decode.py capture.bin --epoch gps          # tempi dei pacchetti come date (epoca dall'ICD)
+python cadu_decode.py capture.bin --epoch none         # tempi dei pacchetti in secondi (default: gps-utc)
 python cadu_decode.py capture.bin --export-tables out  # tabelle dei pacchetti in CSV
 ```
 
