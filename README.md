@@ -157,6 +157,18 @@ tempo è il **SID** (Structure ID, 16 bit: byte 21–22 del pacchetto). Il riepi
   con il totale. È il volume HKTM reale per SID, da confrontare con le stime di storage.
 
 Il SID è solo il numero: cosa contiene ogni struttura (i parametri) è nel MIB (`pid.dat`, `plf.dat`) o nell'ICD.
+
+La sezione **Packets by PUS service** dice quanto pesa ogni servizio nel file (gli idle packet esclusi):
+
+- per **servizio** (tutti gli APID insieme, dal più pesante): APID, pacchetti, byte, quota sul totale, B/s e MB al
+  giorno, con la riga del totale;
+- per **APID e servizio**: pacchetti, byte, quota, lunghezza, periodo (mediana degli intervalli tra i tempi dei
+  pacchetti: ha senso per i pacchetti periodici), B/s e MB al giorno.
+
+B/s e MB al giorno sono i byte diviso il tempo coperto dal file (dal primo all'ultimo tempo dei pacchetti): valgono
+per i pacchetti periodici e per quelli sporadici (eventi, verifiche). I pacchetti senza Data Field Header PUS (per
+esempio i time report dell'APID 0) hanno servizio "–" e nessun periodo. Serve per confrontare il volume reale con un
+budget di telemetria: per esempio quanto pesano i 2,9 (Physical Device Data) rispetto ai 3,25.
 Anche `--show`, il dettaglio del frame nella finestra e `packets.csv` danno servizio e SID di ogni pacchetto.
 
 `--export-packets cartella` scrive i pacchetti di ogni APID in `cartella/apid_NNNN.bin` (uno dopo l'altro, in
