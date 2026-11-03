@@ -298,13 +298,13 @@ class SummaryView(Page):
             length = str(a["min_length"]) if a["min_length"] == a["max_length"] else \
                 f"{a['min_length']}–{a['max_length']}"
             table.append((f"{a['apid']}" + (" (idle)" if idle else ""), a["vc"], f"{a['packets']:,}",
-                          f"{a['bytes']:,}", length, a["first_seq"], a["last_seq"],
+                          f"{a['bytes']:,}", length, cd.services_text(a.get("services")), a["first_seq"], a["last_seq"],
                           ("complete" if not (a["missing"] or a["missing_lost_frames"]) else "gaps") if check else "",
                           a["missing"] if check else "", a["missing_lost_frames"] if check else "",
                           a["back_jumps"] if check else "", a["repeated"] if check else ""))
             tags.append(("" if not check else "gap" if a["missing"] or a["missing_lost_frames"] else "ok"))
         tree = self._table((("APID", 90), ("VC", 50), ("Packets", 90), ("Bytes", 110), ("Length", 80),
-                            ("Seq first", 75), ("Seq last", 75), ("Continuity", 80),
+                            ("Services", 90), ("Seq first", 75), ("Seq last", 75), ("Continuity", 80),
                             ("Missing, no frame lost", 150), ("Missing, lost frames", 140), ("Back jumps", 85),
                             ("Repeated", 80)), table)
         for item, tag in zip(tree.get_children(), tags):
@@ -322,6 +322,29 @@ class SummaryView(Page):
                         [(g["apid"], g["vc"], g["before"], g["after"], g["missing"], g["frame_before"], g["frame"],
                           ", ".join(f"VC {v}" for v in g["found_in"]) or "–") for g in gaps],
                         goto_column=6, anchors={7: "w"})
+
+        self._sids(stats.get("sids", []))
+
+    def _sids(self, sids):
+        """The housekeeping structures (SIDs of the PUS-C 3,25 and 3,26 reports) with their period."""
+        total = sum(h["mb_per_day"] for h in sids if h["mb_per_day"])
+        self._section(f"Housekeeping reports by SID ({len({(h['apid'], h['sid']) for h in sids})})",
+                      "PUS-C 3,25 HK and 3,26 diagnostic; SID: 16 bits after the packet time; period: median "
+                      f"interval of the packet times; {total:.3f} MB/day in all; double click: first frame")
+        if not sids:
+            tk.Label(self.page, text="No PUS-C packet of service 3,25 or 3,26.", bg=BG, fg=MUTED,
+                     font=self.f_small).pack(anchor="w", padx=16)
+            return
+        rows = []
+        for h in sids:
+            length = str(h["min_length"]) if h["min_length"] == h["max_length"] else \
+                f"{h['min_length']}–{h['max_length']}"
+            rows.append((h["apid"], f"{h['service']},{h['subtype']}", h["sid"], h["vc"], f"{h['packets']:,}", length,
+                         cd._period_text(h["period"]), f"{h['per_day']:,.0f}" if h["per_day"] else "–",
+                         f"{h['mb_per_day']:.3f}" if h["mb_per_day"] else "–", h["first_frame"]))
+        self._table((("APID", 60), ("Service", 70), ("SID", 60), ("VC", 50), ("Packets", 90), ("Length", 80),
+                     ("Period s", 80), ("Packets/day", 100), ("MB/day", 80), ("First frame", 90)), rows,
+                    goto_column=9)
 
     # --- chart of the errors along the file ---
 

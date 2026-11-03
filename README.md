@@ -144,8 +144,24 @@ dal primo header successivo. Il riepilogo dà:
 - l'elenco dei salti senza frame persi degli APID verificati: APID, VC, contatori prima e dopo, CADU prima e dopo e i VC dove si
   trovano i contatori mancanti (stesso APID su un altro VC).
 
+### Servizi PUS e SID
+
+Dei pacchetti con secondary header viene letto il **Data Field Header PUS** (ECSS-E-ST-70-41C): servizio e
+subtype (PUS-A e PUS-C) e, per PUS-C, il tempo CUC descritto dal suo P-field (con P-field `2F`: 4 byte di secondi
+e 3 di frazione, header di 15 byte). Nei report housekeeping **3,25** (e diagnostici 3,26) il primo campo dopo il
+tempo è il **SID** (Structure ID, 16 bit: byte 21–22 del pacchetto). Il riepilogo dà:
+
+- nella tabella per APID, la colonna **services**: i servizi trovati per quell'APID (per esempio `3,25` o `2,9`);
+- la tabella **Housekeeping reports by SID**: APID, servizio, SID, VC, pacchetti, lunghezza, **periodo** (mediana
+  degli intervalli tra i tempi dei pacchetti di quel SID), pacchetti al giorno e **MB al giorno** a quel periodo,
+  con il totale. È il volume HKTM reale per SID, da confrontare con le stime di storage.
+
+Il SID è solo il numero: cosa contiene ogni struttura (i parametri) è nel MIB (`pid.dat`, `plf.dat`) o nell'ICD.
+Anche `--show`, il dettaglio del frame nella finestra e `packets.csv` danno servizio e SID di ogni pacchetto.
+
 `--export-packets cartella` scrive i pacchetti di ogni APID in `cartella/apid_NNNN.bin` (uno dopo l'altro, in
-ordine di arrivo) e l'elenco di tutti in `packets.csv`; gli idle packet sono lasciati fuori. `--no-packets`
+ordine di arrivo) e l'elenco di tutti in `packets.csv` (con servizio, subtype, SID e tempo CUC); gli idle packet
+sono lasciati fuori. `--no-packets`
 salta la ricostruzione.
 
 ## Contenuto di un CADU

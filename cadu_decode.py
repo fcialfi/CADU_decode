@@ -493,6 +493,57 @@ def virtual_channel_table(good, unit_len: int = 0) -> list[tuple]:
 IDLE_APID = 0x7FF  # idle packets (CCSDS 133.0-B)
 SEQ_MOD = 1 << 14  # packet sequence count: 14 bits
 
+# PUS-C (ECSS-E-ST-70-41C) TM packet data field header, after the 6-byte packet primary header:
+# version (4 bits, = 2) and time reference status (4), service type (8), subtype (8), message type counter (16),
+# destination ID (16), then the CUC time with its preamble (P-field): 15 bytes with P-field 2F (4 + 3 bytes).
+# The housekeeping reports (service 3) carry their structure ID (SID) as the first field of the source data.
+HK_REPORTS = {(3, 25): "HK report", (3, 26): "diagnostic report"}
+SID_BYTES = 2  # 16-bit SID
+PUS_HEAD = 48  # bytes read for the data field header and the SID (enough for any CUC time)
+
+
+def pus_fields(packet: bytes) -> dict:
+    """Service, subtype, time and SID of a TM packet with a PUS data field header ({} without one).
+
+    Read from the first bytes of the packet (header included): "service" and "subtype" for PUS-A (version 1)
+    and PUS-C (version 2); for PUS-C also "time" (CUC seconds, from the P-field) and, for the housekeeping and
+    diagnostic reports (3,25 and 3,26), "sid" (16 bits, right after the time)."""
+    if len(packet) < 9 or not (packet[0] >> 3) & 1 or (packet[0] >> 4) & 1:  # no secondary header, or a TC
+        return {}
+    version = packet[6] >> 4
+    if version == 2:
+        out = {"pus": 2, "service": packet[7], "subtype": packet[8]}
+    elif (version & 0x7) == 1:  # PUS-A: spare bit, version 1 (3 bits), spare
+        return {"pus": 1, "service": packet[7], "subtype": packet[8]}
+    else:
+        return {}
+    pos = 13
+    if len(packet) <= pos:
+        return out
+    pfield = packet[pos]
+    coarse, fine = ((pfield >> 2) & 0x3) + 1, pfield & 0x3
+    pos += 1
+    if pfield & 0x80:  # second P-field octet: more coarse and fine octets
+        if len(packet) <= pos:
+            return out
+        coarse += (packet[pos] >> 5) & 0x3
+        fine += (packet[pos] >> 2) & 0x7
+        pos += 1
+    if (pfield >> 4) & 0x7 not in (1, 2) or len(packet) < pos + coarse + fine:  # not a CUC time code
+        return out
+    out["time"] = int.from_bytes(packet[pos:pos + coarse], "big") + (
+        int.from_bytes(packet[pos + coarse:pos + coarse + fine], "big") / (1 << (8 * fine)) if fine else 0)
+    pos += coarse + fine
+    out["sid_offset"] = pos
+    if (out["service"], out["subtype"]) in HK_REPORTS and len(packet) >= pos + SID_BYTES:
+        out["sid"] = int.from_bytes(packet[pos:pos + SID_BYTES], "big")
+    return out
+
+
+def service_text(pus: dict) -> str:
+    """"3,25" or "" without a PUS header."""
+    return f"{pus['service']},{pus['subtype']}" if pus else ""
+
 
 def frame_data_fields(data: bytes, rows, interleave: int = 5, randomized: bool = True, fecf: bool = False,
                       frame_length: int = 0):
@@ -519,9 +570,9 @@ def iter_packets(data: bytes, rows, interleave: int = 5, randomized: bool = True
                  keep_data: bool = False, vc_stats=None, progress=None, frame_length: int = 0):
     """Space Packets rebuilt from the frames, virtual channel by virtual channel, in order of arrival.
 
-    Yields (vc, apid, seq_flags, seq_count, length, sec_header_flag, frame, chain, packet), with ``frame``
+    Yields (vc, apid, seq_flags, seq_count, length, sec_header_flag, frame, chain, packet, pus), with ``frame``
     the number of the CADU where the packet starts, ``packet`` its bytes (with ``keep_data``, otherwise
-    None) and ``chain`` a number that changes whenever the packet stream of the VC breaks: a frame of the
+    None), ``pus`` its PUS service, time and SID (see pus_fields) and ``chain`` a number that changes whenever the packet stream of the VC breaks: a frame of the
     VC lost (VC frame counter jump, e.g. an uncorrectable frame) or a packet that does not end where the
     next First Header Pointer says. The packets of one chain follow each other without anything lost.
     ``vc_stats`` (a dict) receives per VC: frames, idle_frames, packets, packet_bytes, idle_packet_bytes,
@@ -600,8 +651,9 @@ def _extract(vc, s, st, keep_data):
         st["packet_bytes"] += length
         if apid == IDLE_APID:
             st["idle_packet_bytes"] += length
+        pus = pus_fields(bytes(buf[:min(length, PUS_HEAD)])) if (word >> 11) & 1 and apid != IDLE_APID else {}
         yield (vc, apid, seq >> 14, seq & 0x3FFF, length, (word >> 11) & 1, marks[0][1], s["chain"],
-               bytes(buf[:length]) if keep_data else None)
+               bytes(buf[:length]) if keep_data else None, pus)
         del buf[:length]
         s["base"] += length
 
@@ -623,14 +675,28 @@ def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool =
     apids = {}
     gaps = []
     seqs = {}
-    for vc, apid, flags, seq, length, sec, frame, chain, _ in iter_packets(
+    sids = {}
+    for vc, apid, flags, seq, length, sec, frame, chain, _, pus in iter_packets(
             data, rows, interleave, randomized, fecf, vc_stats=vcs, progress=progress, frame_length=frame_length):
+        if "sid" in pus:
+            key = (apid, pus["service"], pus["subtype"], pus["sid"], vc)
+            h = sids.get(key)
+            if h is None:
+                h = sids[key] = {"apid": apid, "service": pus["service"], "subtype": pus["subtype"],
+                                 "sid": pus["sid"], "vc": vc, "packets": 0, "bytes": 0, "min_length": length,
+                                 "max_length": length, "first_frame": frame, "_times": []}
+            h["packets"] += 1
+            h["bytes"] += length
+            h["min_length"] = min(h["min_length"], length)
+            h["max_length"] = max(h["max_length"], length)
+            h["_times"].append(pus["time"])
         a = apids.get((apid, vc))
         if a is None:
             a = apids[(apid, vc)] = {"apid": apid, "vc": vc, "packets": 0, "bytes": 0, "min_length": length,
                                      "max_length": length, "first_seq": seq, "last_seq": seq, "gaps": 0,
                                      "missing": 0, "gaps_lost_frames": 0, "missing_lost_frames": 0,
-                                     "repeated": 0, "back_jumps": 0, "sec_header": sec, "_chain": chain, "_frame": frame}
+                                     "repeated": 0, "back_jumps": 0, "sec_header": sec, "services": Counter(),
+                                     "_chain": chain, "_frame": frame}
             seqs[(apid, vc)] = array("H")
         else:
             step = (seq - a["last_seq"]) % SEQ_MOD
@@ -650,6 +716,8 @@ def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool =
                     a["missing_lost_frames"] += step - 1
         a["packets"] += 1
         a["bytes"] += length
+        if pus:
+            a["services"][(pus["service"], pus["subtype"])] += 1
         a["min_length"] = min(a["min_length"], length)
         a["max_length"] = max(a["max_length"], length)
         a["last_seq"], a["_chain"], a["_frame"] = seq, chain, frame
@@ -672,7 +740,25 @@ def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool =
     table = sorted(apids.values(), key=lambda a: (a["apid"], a["vc"]))
     for a in table:
         del a["_chain"], a["_frame"]
-    return {"vcs": vcs, "apids": table, "gaps": gaps}
+    return {"vcs": vcs, "apids": table, "gaps": gaps, "sids": sid_table(sids.values())}
+
+
+def sid_table(items) -> list[dict]:
+    """The housekeeping structures (one dict per APID, service, SID and VC) with their period: the median of the
+    intervals between the packet times (CUC), the packets per day and the MB per day it gives."""
+    import statistics
+
+    table = []
+    for h in sorted(items, key=lambda h: (h["apid"], h["service"], h["subtype"], h["sid"], h["vc"])):
+        times = sorted(set(h.pop("_times")))
+        steps = [b - a for a, b in zip(times, times[1:])]
+        period = statistics.median(steps) if steps else None
+        h["first_time"], h["last_time"] = (times[0], times[-1]) if times else (None, None)
+        h["period"] = period
+        h["per_day"] = 86400 / period if period else None
+        h["mb_per_day"] = h["per_day"] * h["bytes"] / h["packets"] / 1e6 if period else None
+        table.append(h)
+    return table
 
 
 DEFAULT_CHECKED_APIDS = "0, 100"  # time reporting and science data (Payload Main Application)
@@ -711,7 +797,7 @@ def packet_lines(stats: dict, max_listed: int = 50, checked=None) -> list[str]:
     lines.append("  idle packets: APID 2047; MB: 10^6 bytes; cut: packets lost where frames of the VC are missing; "
                  "resyncs: packet stream broken with no frame missing")
     lines.append("")
-    table = [("APID", "VC", "packets", "bytes", "length", "seq first", "seq last", "gaps", "missing",
+    table = [("APID", "VC", "packets", "bytes", "length", "services", "seq first", "seq last", "gaps", "missing",
               "at lost frames", "back jumps", "repeated")]
     for a in stats["apids"]:
         length = str(a["min_length"]) if a["min_length"] == a["max_length"] else \
@@ -719,7 +805,8 @@ def packet_lines(stats: dict, max_listed: int = 50, checked=None) -> list[str]:
         idle = a["apid"] == IDLE_APID
         check = a["apid"] in checked and not idle
         table.append((f"{a['apid']}" + (" idle" if idle else " *" if check else ""), a["vc"], a["packets"],
-                      a["bytes"], length, a["first_seq"], a["last_seq"], a["gaps"] if check else "–",
+                      a["bytes"], length, services_text(a.get("services")), a["first_seq"], a["last_seq"],
+                      a["gaps"] if check else "–",
                       a["missing"] if check else "–",
                       f"{a['gaps_lost_frames']} ({a['missing_lost_frames']} missing)" if check else "–",
                       a["back_jumps"] if check else "–", a["repeated"] if check else "–"))
@@ -740,6 +827,38 @@ def packet_lines(stats: dict, max_listed: int = 50, checked=None) -> list[str]:
         lines += ["    " + line for line in _table(table, last_left=True)]
         if len(gaps) > max_listed:
             lines.append(f"    ... {len(gaps) - max_listed} more")
+    lines += sid_lines(stats.get("sids", []))
+    return lines
+
+
+def services_text(services) -> str:
+    """PUS services of an APID, most frequent first: "3,25 2,9"; "–" with none."""
+    if not services:
+        return "–"
+    return " ".join(f"{t},{s}" for (t, s), _ in services.most_common())
+
+
+def _period_text(seconds) -> str:
+    return "–" if seconds is None else f"{seconds:.3f}".rstrip("0").rstrip(".")
+
+
+def sid_lines(sids) -> list[str]:
+    """Text of the housekeeping structures found (SIDs of the PUS 3,25 and 3,26 reports)."""
+    lines = ["", "Housekeeping reports by SID (PUS-C 3,25 HK and 3,26 diagnostic; SID: 16 bits after the "
+                 "packet time):"]
+    if not sids:
+        return lines + ["  none (no PUS-C packet of service 3,25 or 3,26)"]
+    table = [("APID", "service", "SID", "VC", "packets", "length", "period s", "packets/day", "MB/day")]
+    for h in sids:
+        length = str(h["min_length"]) if h["min_length"] == h["max_length"] else \
+            f"{h['min_length']}-{h['max_length']}"
+        table.append((h["apid"], f"{h['service']},{h['subtype']}", h["sid"], h["vc"], h["packets"], length,
+                      _period_text(h["period"]), f"{h['per_day']:.0f}" if h["per_day"] else "–",
+                      f"{h['mb_per_day']:.3f}" if h["mb_per_day"] else "–"))
+    lines += ["  " + line for line in _table(table)]
+    total = sum(h["mb_per_day"] for h in sids if h["mb_per_day"])
+    lines.append(f"  {len({(h['apid'], h['sid']) for h in sids})} SIDs; period: median interval between the packet "
+                 f"times of the SID; MB/day at that period: {total:.3f} in all (1 MB = 10^6 bytes)")
     return lines
 
 
@@ -769,13 +888,16 @@ def export_packets(data: bytes, rows, folder: str, interleave: int = 5, randomiz
     try:
         with open(os.path.join(folder, "packets.csv"), "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(("vc", "apid", "seq_flags", "seq_count", "length", "sec_header_flag", "cadu", "chain"))
-            for vc, apid, flags, seq, length, sec, frame, chain, packet in iter_packets(
+            writer.writerow(("vc", "apid", "seq_flags", "seq_count", "length", "sec_header_flag", "cadu", "chain",
+                             "service", "subtype", "sid", "time"))
+            for vc, apid, flags, seq, length, sec, frame, chain, packet, pus in iter_packets(
                     data, rows, interleave, randomized, fecf, keep_data=True, progress=progress,
                     frame_length=frame_length):
                 if apid == IDLE_APID and not include_idle:
                     continue
-                writer.writerow((vc, apid, flags, seq, length, sec, frame, chain))
+                writer.writerow((vc, apid, flags, seq, length, sec, frame, chain, pus.get("service", ""),
+                                 pus.get("subtype", ""), pus.get("sid", ""),
+                                 f"{pus['time']:.6f}" if "time" in pus else ""))
                 if apid not in files:
                     files[apid] = open(os.path.join(folder, f"apid_{apid:04d}.bin"), "wb")
                 files[apid].write(packet)
@@ -951,6 +1073,7 @@ def packet_headers(data_field: bytes, fhp: int) -> list[dict]:
             "offset": pos, "version": word >> 13, "type": (word >> 12) & 1, "sec_header_flag": (word >> 11) & 1,
             "apid": word & 0x7FF, "sequence_flags": seq >> 14, "sequence_count": seq & 0x3FFF, "length": length,
             "continues": pos + length > len(data_field),
+            "pus": pus_fields(data_field[pos:pos + min(length, PUS_HEAD)]) if word & 0x7FF != IDLE_APID else {},
         })
         pos += length
     return packets
@@ -1033,13 +1156,14 @@ def show_cadu(number: int, row: dict, data: bytes, interleave: int, randomized: 
     else:
         if row["first_header_pointer"]:
             lines.append(f"  bytes 0-{row['first_header_pointer'] - 1}: end of a packet started in a previous frame")
-        table = [("at byte", "ver", "type", "SH", "APID", "seq flags", "seq count", "length", "")]
+        table = [("at byte", "ver", "type", "SH", "APID", "seq flags", "seq count", "length", "service", "SID", "")]
         for p in packets:
             if "apid" not in p:
-                table.append((p["offset"], "", "", "", "", "", "", "", "header continues in the next frame"))
+                table.append((p["offset"], "", "", "", "", "", "", "", "", "", "header continues in the next frame"))
             else:
                 table.append((p["offset"], p["version"], p["type"], p["sec_header_flag"], p["apid"],
                               f"{p['sequence_flags']:02b}", p["sequence_count"], p["length"],
+                              service_text(p["pus"]) or "–", p["pus"].get("sid", "–"),
                               "continues in the next frame" if p["continues"] else ""))
         lines += ["  Packets starting in this frame (offsets in the data field, length with header):"]
         lines += ["  " + line for line in _table(table)]
