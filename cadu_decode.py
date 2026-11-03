@@ -540,8 +540,28 @@ def pus_fields(packet: bytes) -> dict:
     return out
 
 
+# Leap seconds: the dates (UTC) from which GPS time is one more second ahead of UTC (18 s since 2017-01-01).
+LEAP_SECONDS = [datetime(*d) for d in (
+    (1981, 7, 1), (1982, 7, 1), (1983, 7, 1), (1985, 7, 1), (1988, 1, 1), (1990, 1, 1), (1991, 1, 1), (1992, 7, 1),
+    (1993, 7, 1), (1994, 7, 1), (1996, 1, 1), (1997, 7, 1), (1999, 1, 1), (2006, 1, 1), (2009, 1, 1), (2012, 7, 1),
+    (2015, 7, 1), (2017, 1, 1))]
+
+
+class GpsUtc:
+    """The GPS epoch (1980-01-06), times shown in UTC: GPS time less the leap seconds (18 s since 2017)."""
+    start = datetime(1980, 1, 6)
+
+    def __eq__(self, other):
+        return isinstance(other, GpsUtc)
+
+    def __repr__(self):
+        return "GpsUtc()"
+
+
+DEFAULT_EPOCH = "gps-utc"  # AWS: on-board time from the GPS epoch
 EPOCHS = {  # epochs of the CUC time codes (P-field 2F: agency-defined epoch, see the mission ICD)
     "none": None,
+    "gps-utc": GpsUtc(),
     "gps": datetime(1980, 1, 6),
     "tai": datetime(1958, 1, 1),
     "unix": datetime(1970, 1, 1),
@@ -550,21 +570,34 @@ EPOCHS = {  # epochs of the CUC time codes (P-field 2F: agency-defined epoch, se
 
 
 def parse_epoch(text: str):
-    """An epoch: none, gps, tai, unix, 2000, or a date as 2000-01-01 or 2000-01-01T12:00:00."""
+    """An epoch: none, gps-utc (GPS epoch, dates in UTC), gps, tai, unix, 2000, or a date as 2000-01-01 or
+    2000-01-01T12:00:00."""
     key = (text or "none").strip().lower().split()[0]
     if key in EPOCHS:
         return EPOCHS[key]
     return datetime.fromisoformat(text.strip())
 
 
+def gps_to_utc(gps_time: datetime) -> datetime:
+    """A GPS time as UTC: less the leap seconds since the GPS epoch."""
+    from datetime import timedelta
+
+    leaps = sum(1 for d in LEAP_SECONDS if gps_time - timedelta(seconds=LEAP_SECONDS.index(d)) >= d)
+    return gps_time - timedelta(seconds=leaps)
+
+
 def time_text(seconds, epoch=None) -> str:
-    """A CUC time: the date with an epoch (no leap seconds: the time scale of the epoch), else the seconds."""
+    """A CUC time: the date with an epoch, else the seconds. With gps-utc the date is in UTC (leap seconds
+    removed); with the other epochs it is in the time scale of the epoch (no leap seconds)."""
     if seconds is None:
         return "–"
     if epoch is None:
         return f"{seconds:.3f} s"
     from datetime import timedelta
 
+    if isinstance(epoch, GpsUtc):
+        date = gps_to_utc(epoch.start + timedelta(seconds=seconds))
+        return date.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + " UTC"
     return (epoch + timedelta(seconds=seconds)).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
@@ -1551,7 +1584,8 @@ def file_overview(name: str, data: bytes, interleave: int = 5, input_kind: str =
         analysed = good if exclude_bad else rows
         out["report"] = [line] + (summary(analysed, len(data), sync_len + block_len, max_listed, all_rows=rows,
                                           packets=stats, checked_apids=checked_apids,
-                                          unit="Transfer frames" if length else "CADUs")
+                                          unit="Transfer frames" if length else "CADUs",
+                                          epoch=parse_epoch(DEFAULT_EPOCH))
                                   if rows else ["The file is shorter than one transfer frame." if length
                                                 else "No sync marker 1ACFFC1D found."])
     return out
@@ -1661,9 +1695,10 @@ def main(argv=None) -> int:
     ap.add_argument("--check-apids", default=DEFAULT_CHECKED_APIDS, metavar="LIST",
                     help="APIDs whose sequence count continuity is checked, e.g. 100 or 15-16,100 (default "
                          f"{DEFAULT_CHECKED_APIDS}: time reporting and science data); the others may be filtered on board")
-    ap.add_argument("--epoch", default="none", metavar="EPOCH",
-                    help="epoch of the CUC packet times, to show them as dates: none (default: seconds), gps "
-                         "(1980-01-06), tai (1958-01-01), unix, 2000, or a date such as 2000-01-01")
+    ap.add_argument("--epoch", default=DEFAULT_EPOCH, metavar="EPOCH",
+                    help="epoch of the CUC packet times, to show them as dates: gps-utc (default: GPS epoch "
+                         "1980-01-06, dates in UTC, leap seconds removed), gps (GPS time), tai (1958-01-01), unix, "
+                         "2000, a date such as 2000-01-01, or none (seconds)")
     ap.add_argument("--export-tables", metavar="FOLDER",
                     help="write the packet tables of the summary (VCs, APIDs, services, SIDs, gaps) as CSV files "
                          "to FOLDER")
@@ -1686,7 +1721,7 @@ def main(argv=None) -> int:
     try:
         args.epoch_value = parse_epoch(args.epoch)
     except ValueError:
-        ap.error(f"--epoch: not an epoch: {args.epoch} (none, gps, tai, unix, 2000 or a date as 2000-01-01)")
+        ap.error(f"--epoch: not an epoch: {args.epoch} (gps-utc, gps, tai, unix, 2000, a date as 2000-01-01 or none)")
     if args.export_tables and args.no_packets:
         ap.error("--export-tables contradicts --no-packets")
     if args.export_packets and args.no_packets:

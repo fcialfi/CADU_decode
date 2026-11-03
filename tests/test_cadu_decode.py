@@ -482,7 +482,7 @@ def test_packets_by_service(capsys, tmp_path):
     text = capsys.readouterr().out.split("Packets by PUS service")[1].split("Housekeeping reports by SID")[0]
     assert "rates over the 59 s" in text and "By APID and service:" in text
     assert "covered by the periodic packets" in text
-    assert "packet times 1000.000 s to 1059.000 s" in text
+    assert "packet times 1980-01-06 00:16:40.000 UTC to 1980-01-06 00:17:39.000 UTC" in text   # default: gps-utc
     assert any(line.split()[:2] == ["2,9", "15"] for line in text.splitlines())
 
 
@@ -520,8 +520,16 @@ def test_rates_ignore_breaks_in_the_times():
 def test_epoch_and_time_text():
     assert cd.parse_epoch("gps") == cd.datetime(1980, 1, 6) and cd.parse_epoch("none") is None
     assert cd.parse_epoch("2000-01-01") == cd.datetime(2000, 1, 1)
+    assert cd.parse_epoch(cd.DEFAULT_EPOCH) == cd.GpsUtc()
     assert cd.time_text(86400 + 0.25, cd.EPOCHS["gps"]) == "1980-01-07 00:00:00.250"
     assert cd.time_text(12.5) == "12.500 s" and cd.time_text(None) == "–"
+    # The last packet of an AWS dump: GPS time 10:13:16.954, 18 leap seconds since 2017: 10:12:58.954 UTC
+    assert cd.time_text(1477217596.954, cd.EPOCHS["gps"]).startswith("2026-10-28 10:13:16.95")
+    assert cd.time_text(1477217596.954, cd.GpsUtc()).startswith("2026-10-28 10:12:58.95")
+    assert cd.time_text(1477217596.954, cd.GpsUtc()).endswith(" UTC")
+    # Before the first leap second (1981-07-01) GPS and UTC agree; just after it they differ by 1 s
+    assert cd.gps_to_utc(cd.datetime(1981, 6, 30, 12)) == cd.datetime(1981, 6, 30, 12)
+    assert cd.gps_to_utc(cd.datetime(1981, 7, 2)) == cd.datetime(1981, 7, 1, 23, 59, 59)
 
 
 def test_export_tables(tmp_path, capsys):
