@@ -11,7 +11,9 @@ pseudo-randomizer CCSDS. Con interleaving I = 5 il CADU è di 4 + 255·5 = 1279 
 
 Per ogni CADU lo script:
 
-- si sincronizza sul sync marker (se tra due CADU c'è altro, salta al marker successivo e lo segnala);
+- si sincronizza sul sync marker (se tra due CADU c'è altro, salta al marker successivo); il riepilogo dice quanti
+  byte del file non sono in nessun CADU (o transfer frame): all'inizio, tra un CADU e l'altro (in quanti tratti e il
+  primo offset) e in fondo;
 - de-randomizza il codeblock (sequenza h(x) = x⁸ + x⁷ + x⁵ + x³ + 1, che inizia FF 48 0E C0 9A …) se è
   randomizzato. Molti ricevitori salvano i CADU già de-randomizzati: lo script lo riconosce da solo provando
   le due letture sui primi 200 CADU (versione del frame 0 e master channel counter che sale di 1). Letti nel modo
@@ -111,7 +113,9 @@ Per un file con molti CADU lo script mostra di default un riepilogo:
 - numero di CADU;
 - SCID trovati (solo dai frame buoni);
 - master channel frame counter: primo e ultimo valore, salti e frame mancanti stimati (contatore a 8 bit:
-  i salti sono contati modulo 256);
+  i salti sono contati modulo 256). Se nel file c'è **un solo VC** (per esempio un file con i soli frame del VC 3),
+  i salti dell'MCFC sono i frame degli altri VC, che il file non contiene, e il riepilogo lo dice: i frame persi
+  sono quelli del contatore del VC (VCFC);
 - per ogni **virtual channel**: numero di frame e quota, frame idle (FHP 7FE), frame con inizio di
   pacchetto, frame senza header (FHP 7FF), primo e ultimo VCFC, salti e frame mancanti, frame corretti dal
   Reed-Solomon. I frame non correggibili non sono contati: il loro header (VC compreso) non è affidabile;
@@ -165,15 +169,23 @@ La sezione **Packets by PUS service** dice quanto pesa ogni servizio nel file (g
 - per **APID e servizio**: pacchetti, byte, quota, lunghezza, periodo (mediana degli intervalli tra i tempi dei
   pacchetti: ha senso per i pacchetti periodici), B/s e MB al giorno.
 
-B/s e MB al giorno sono i byte diviso il tempo coperto dal file (dal primo all'ultimo tempo dei pacchetti): valgono
-per i pacchetti periodici e per quelli sporadici (eventi, verifiche). I pacchetti senza Data Field Header PUS (per
+B/s e MB al giorno sono i byte diviso il tempo coperto dai tempi dei pacchetti: valgono per i pacchetti periodici e
+per quelli sporadici (eventi, verifiche). Il tempo coperto è la somma degli intervalli tra tempi consecutivi, senza
+le **pause** (intervalli oltre 20 volte l'intervallo mediano e oltre 60 s: il passaggio dal real-time a un dump, o un
+pacchetto con il tempo sbagliato), che sono contate e segnalate; un solo tempo sbagliato non falsa quindi i rate.
+Il riepilogo dà anche il primo e l'ultimo tempo dei pacchetti: in secondi, oppure come data con `--epoch`
+(epoca del tempo CUC: `gps` 1980-01-06, `tai` 1958-01-01, `unix`, `2000` o una data come `2000-01-01`; con il
+P-field `2F` l'epoca è definita dalla missione: va presa dall'ICD; le date sono nella scala di tempo dell'epoca,
+senza leap second). I pacchetti senza Data Field Header PUS (per
 esempio i time report dell'APID 0) hanno servizio "–" e nessun periodo. Serve per confrontare il volume reale con un
 budget di telemetria: per esempio quanto pesano i 2,9 (Physical Device Data) rispetto ai 3,25.
 Anche `--show`, il dettaglio del frame nella finestra e `packets.csv` danno servizio e SID di ogni pacchetto.
 
 `--export-packets cartella` scrive i pacchetti di ogni APID in `cartella/apid_NNNN.bin` (uno dopo l'altro, in
 ordine di arrivo) e l'elenco di tutti in `packets.csv` (con servizio, subtype, SID e tempo CUC); gli idle packet
-sono lasciati fuori. `--no-packets`
+sono lasciati fuori. `--export-tables cartella` scrive le tabelle dei pacchetti del riepilogo in CSV: `vcs.csv`,
+`apids.csv`, `services.csv` (per APID e servizio), `service_totals.csv`, `sids.csv` (con primo e ultimo tempo) e
+`gaps.csv`; servizio e subtype sono in due colonne. `--no-packets`
 salta la ricostruzione.
 
 ## Contenuto di un CADU
@@ -204,8 +216,13 @@ salta la ricostruzione.
   viene riletto; accanto al nome del file è scritto se i codeblock sono stati letti come randomizzati;
 - scheda **Summary**: il riepilogo in forma grafica: riquadri con i numeri principali (CADU, frame senza errori, corretti, non correggibili, FER,
   spacecraft), il grafico degli errori Reed-Solomon lungo il file (byte corretti per frame
-  e frame non correggibili in rosso, con i bordi del 5 % in grigio; passando col mouse un tooltip dà il CADU, la barra e i frame non correggibili lì vicino; trascinando o con la rotella si fa lo zoom fino al singolo CADU, clic destro torna al file intero, doppio clic apre il CADU), le tabelle dei virtual channel, dei pacchetti per VC e per APID (in arancione gli APID con salti del sequence count), dei salti senza frame persi, della CLCW
+  e frame non correggibili in rosso, con i bordi del 5 % in grigio; passando col mouse un tooltip dà il CADU, la barra e i frame non correggibili lì vicino; trascinando o con la rotella si fa lo zoom fino al singolo CADU, clic destro torna al file intero, doppio clic apre il CADU), la tabella dei virtual channel (con gli avvisi sui byte fuori dai CADU e sul file con un solo VC), della CLCW
   più frequente e di quelle diverse, e dei frame non correggibili; doppio clic su una riga: apre il CADU;
+- scheda **Packets**: le tabelle dei pacchetti: per VC, per APID (in arancione gli APID con salti del sequence
+  count), i salti senza frame persi, per servizio PUS e per APID e servizio (con i tempi dei pacchetti), e i SID;
+  **Time epoch** in alto sceglie l'epoca per mostrare i tempi come date (come `--epoch`);
+- in tutte le tabelle del riepilogo un clic sull'intestazione di una colonna ordina le righe (i numeri come numeri),
+  un secondo clic inverte l'ordine;
 - scheda **Text report**: lo stesso riepilogo come testo, con **Copy to clipboard**;
 - scheda **Frames**: la tabella dei frame, con filtro per virtual channel e caselle che,
   spuntate, mostrano meno frame: **Hide idle frames**, **Only RS errors**, **Only unusual CLCW**; **Go to #**. Selezionando una riga, sotto compare il CADU in forma
@@ -214,7 +231,8 @@ salta la ricostruzione.
   frequente), le 5 parole Reed-Solomon, i pacchetti del data field e il dump esadecimale colorato per sezione con
   i byte corretti evidenziati (**Hex dump** per mostrarlo o no; **Copy as text** copia la versione testuale);
 - **Export** → *Frames to CSV…* salva tutti i frame; *Packets, one file per APID…* scrive i pacchetti di ogni
-  APID in una cartella (come `--export-packets`).
+  APID in una cartella (come `--export-packets`); *Packet tables to CSV…* scrive le tabelle dei pacchetti in una
+  cartella (come `--export-tables`).
 
 ## Eseguibile per Windows
 
@@ -282,6 +300,8 @@ python cadu_gui.py capture.bin                     # finestra
 python cadu_decode.py capture.bin --interleave 4   # altro interleaving (CADU di 4 + 255·I byte)
 python cadu_decode.py capture.bin --fecf           # frame con FECF (2 byte) in coda
 python cadu_decode.py capture.bin --randomization no   # forza: codeblock già de-randomizzato (yes: randomizzato)
+python cadu_decode.py capture.bin --epoch gps          # tempi dei pacchetti come date (epoca dall'ICD)
+python cadu_decode.py capture.bin --export-tables out  # tabelle dei pacchetti in CSV
 ```
 
 Il file può essere binario oppure testo con i byte in esadecimale (spazi e a capo ignorati).

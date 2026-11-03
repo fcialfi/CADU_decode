@@ -133,12 +133,20 @@ class CaduWindow:
         self.exclude_box = ttk.Checkbutton(bar, text="Exclude uncorrectable frames", variable=self.exclude_var,
                                            command=self._exclude_changed)
         self.exclude_box.pack(side=tk.LEFT)
+        self.epoch_var = tk.StringVar(value="none")
         export = ttk.Menubutton(bar, text="Export")
         menu = tk.Menu(export, tearoff=False)
         menu.add_command(label="Frames to CSV…", command=self.export_csv)
         menu.add_command(label="Packets, one file per APID…", command=self.export_packets)
+        menu.add_command(label="Packet tables to CSV…", command=self.export_tables)
         export["menu"] = menu
         export.pack(side=tk.RIGHT)
+        epoch = ttk.Combobox(bar, textvariable=self.epoch_var, width=6,
+                             values=("none", "gps", "tai", "unix", "2000"))
+        epoch.pack(side=tk.RIGHT, padx=(4, 12))
+        epoch.bind("<<ComboboxSelected>>", lambda _e: self.refresh_summary())
+        epoch.bind("<Return>", lambda _e: self.refresh_summary())
+        ttk.Label(bar, text="Time epoch").pack(side=tk.RIGHT)
         root.bind_all("<Control-q>", lambda _e: self.exit_app())
         root.bind_all("<F1>", lambda _e: self.show_about())
         root.protocol("WM_DELETE_WINDOW", self.exit_app)
@@ -163,8 +171,11 @@ class CaduWindow:
         self.summary_view = SummaryView(self.tabs, on_goto=self.open_cadu, check_var=self.check_var,
                                         on_check=self.refresh_summary)
         self.tabs.add(self.summary_view, text="Summary")
+        self.packets_view = SummaryView(self.tabs, on_goto=self.open_cadu, check_var=self.check_var,
+                                        on_check=self.refresh_summary, part="packets")
+        self.tabs.add(self.packets_view, text="Packets")
 
-        frames_tab = ttk.Frame(self.tabs)
+        frames_tab = self.frames_tab = ttk.Frame(self.tabs)
         self.tabs.add(frames_tab, text="Frames")
         filters = ttk.Frame(frames_tab, padding=(0, 4))
         filters.pack(fill=tk.X)
@@ -580,12 +591,20 @@ class CaduWindow:
             self.check_var.set(cd.DEFAULT_CHECKED_APIDS)
             checked = cd.parse_apids(cd.DEFAULT_CHECKED_APIDS)
         self._checked = checked
+        try:
+            self._epoch = cd.parse_epoch(self.epoch_var.get())
+        except ValueError:
+            messagebox.showerror("Time epoch", f"Not an epoch: {self.epoch_var.get()}\n\nnone, gps (1980-01-06), "
+                                 "tai (1958-01-01), unix, 2000, or a date such as 2000-01-01.")
+            self.epoch_var.set("none")
+            self._epoch = None
         self._fill_report()
-        top = self.summary_view.canvas.yview()[0]
-        self.summary_view.update_view(self._analysed(), self.rows, len(self.data), self.cadu_len, self.packets,
-                                      unit=self._unit())
-        self.root.update_idletasks()
-        self.summary_view.canvas.yview_moveto(top)  # keep the page where it was
+        for view in (self.summary_view, self.packets_view):
+            top = view.canvas.yview()[0]
+            view.update_view(self._analysed(), self.rows, len(self.data), self.cadu_len, self.packets,
+                             unit=self._unit(), epoch=self._epoch)
+            self.root.update_idletasks()
+            view.canvas.yview_moveto(top)  # keep the page where it was
 
     def _fill_report(self) -> None:
         """Text report (every frame and gap listed, not only the first 50). With several files: the overview
@@ -607,7 +626,8 @@ class CaduWindow:
         if self.rows:
             lines += cd.summary(self._analysed(), len(self.data), self.cadu_len, max_listed=10 ** 9,
                                 all_rows=self.rows, packets=self.packets,
-                                checked_apids=getattr(self, "_checked", None), unit=self._unit())
+                                checked_apids=getattr(self, "_checked", None), unit=self._unit(),
+                                epoch=getattr(self, "_epoch", None))
         else:
             lines.append("The file is shorter than one transfer frame." if self.frame_length
                          else "No sync marker 1ACFFC1D found.")
@@ -684,7 +704,7 @@ class CaduWindow:
 
     def open_cadu(self, number: int) -> None:
         """Show CADU ``number`` in the Frames tab (from the summary tables)."""
-        self.tabs.select(1)
+        self.tabs.select(self.frames_tab)
         self.goto_var.set(str(number))
         self.goto()
 
@@ -728,6 +748,21 @@ class CaduWindow:
         listed = "\n".join(f"APID {apid}: {n} packets → apid_{apid:04d}.bin" for apid, n in sorted(counts.items()))
         messagebox.showinfo("Export packets", f"Written to {folder}:\n\n{listed or 'no packets'}\n\n"
                             "packets.csv lists every packet (idle packets, APID 2047, left out).")
+
+    def export_tables(self) -> None:
+        """The packet tables of the summary (VCs, APIDs, services, SIDs, gaps) as CSV files in a folder."""
+        if not self.rows or self.packets is None:
+            messagebox.showinfo("Export tables", "Open a file first.")
+            return
+        folder = filedialog.askdirectory(title="Folder for the packet tables (CSV)", mustexist=False)
+        if not folder:
+            return
+        try:
+            names = cd.export_tables(self.packets, folder, getattr(self, "_epoch", None))
+        except OSError as exc:
+            messagebox.showerror("Export tables", f"Cannot write to {folder}: {exc}")
+            return
+        messagebox.showinfo("Export tables", f"Written to {folder}:\n\n" + "\n".join(names))
 
     def export_csv(self) -> None:
         if not self.rows:

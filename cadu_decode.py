@@ -540,6 +540,34 @@ def pus_fields(packet: bytes) -> dict:
     return out
 
 
+EPOCHS = {  # epochs of the CUC time codes (P-field 2F: agency-defined epoch, see the mission ICD)
+    "none": None,
+    "gps": datetime(1980, 1, 6),
+    "tai": datetime(1958, 1, 1),
+    "unix": datetime(1970, 1, 1),
+    "2000": datetime(2000, 1, 1),
+}
+
+
+def parse_epoch(text: str):
+    """An epoch: none, gps, tai, unix, 2000, or a date as 2000-01-01 or 2000-01-01T12:00:00."""
+    key = (text or "none").strip().lower().split()[0]
+    if key in EPOCHS:
+        return EPOCHS[key]
+    return datetime.fromisoformat(text.strip())
+
+
+def time_text(seconds, epoch=None) -> str:
+    """A CUC time: the date with an epoch (no leap seconds: the time scale of the epoch), else the seconds."""
+    if seconds is None:
+        return "–"
+    if epoch is None:
+        return f"{seconds:.3f} s"
+    from datetime import timedelta
+
+    return (epoch + timedelta(seconds=seconds)).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
 def service_text(pus: dict) -> str:
     """"3,25" or "" without a PUS header."""
     return f"{pus['service']},{pus['subtype']}" if pus else ""
@@ -677,7 +705,7 @@ def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool =
     seqs = {}
     sids = {}
     services = {}
-    times = [None, None]  # first and last packet time (CUC) of the file
+    all_times = []  # packet times (CUC) of the file
     for vc, apid, flags, seq, length, sec, frame, chain, _, pus in iter_packets(
             data, rows, interleave, randomized, fecf, vc_stats=vcs, progress=progress, frame_length=frame_length):
         if apid != IDLE_APID:
@@ -693,9 +721,7 @@ def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool =
             sv["max_length"] = max(sv["max_length"], length)
             if "time" in pus:
                 sv["_times"].append(pus["time"])
-                t = pus["time"]
-                times[0] = t if times[0] is None else min(times[0], t)
-                times[1] = t if times[1] is None else max(times[1], t)
+                all_times.append(pus["time"])
         if "sid" in pus:
             key = (apid, pus["service"], pus["subtype"], pus["sid"], vc)
             h = sids.get(key)
@@ -758,9 +784,26 @@ def packet_statistics(data: bytes, rows, interleave: int = 5, randomized: bool =
     table = sorted(apids.values(), key=lambda a: (a["apid"], a["vc"]))
     for a in table:
         del a["_chain"], a["_frame"]
-    span = times[1] - times[0] if times[0] is not None and times[1] > times[0] else None
+    span, breaks = time_coverage(all_times)
     return {"vcs": vcs, "apids": table, "gaps": gaps, "sids": sid_table(sids.values()),
-            "services": service_table(services.values(), span), "span": span}
+            "services": service_table(services.values(), span), "span": span, "time_breaks": breaks,
+            "first_time": min(all_times) if all_times else None, "last_time": max(all_times) if all_times else None}
+
+
+def time_coverage(times, min_break: float = 60.0, factor: float = 20.0):
+    """(seconds covered by the packet times, breaks left out). The intervals between consecutive packet times
+    are summed, except the breaks: longer than ``factor`` times the median interval and than ``min_break``
+    seconds (a pause in the data, e.g. between the real-time data and a dump, or a packet with a wrong time).
+    (None, 0) with fewer than two different times."""
+    import statistics
+
+    times = sorted(set(times))
+    steps = [b - a for a, b in zip(times, times[1:])]
+    if not steps:
+        return None, 0
+    limit = max(min_break, factor * statistics.median(steps))
+    covered = sum(x for x in steps if x <= limit)
+    return (covered or None), sum(1 for x in steps if x > limit)
 
 
 def _median_step(times):
@@ -841,7 +884,7 @@ def parse_apids(text: str) -> set:
     return apids
 
 
-def packet_lines(stats: dict, max_listed: int = 50, checked=None) -> list[str]:
+def packet_lines(stats: dict, max_listed: int = 50, checked=None, epoch=None) -> list[str]:
     """Text of the packet statistics (see packet_statistics).
 
     The continuity of the sequence counts is given for the APIDs ``checked`` only (default: 0 and 100): the
@@ -892,7 +935,7 @@ def packet_lines(stats: dict, max_listed: int = 50, checked=None) -> list[str]:
         lines += ["    " + line for line in _table(table, last_left=True)]
         if len(gaps) > max_listed:
             lines.append(f"    ... {len(gaps) - max_listed} more")
-    lines += service_lines(stats.get("services", []), stats.get("span"))
+    lines += service_lines(stats.get("services", []), stats.get("span"), stats, epoch)
     lines += sid_lines(stats.get("sids", []))
     return lines
 
@@ -901,13 +944,24 @@ def _rate_text(value, fmt) -> str:
     return "–" if value is None else format(value, fmt)
 
 
-def service_lines(services, span) -> list[str]:
+def coverage_text(stats: dict, epoch=None) -> str:
+    """First and last packet time, and the time the packets cover (rates are computed over it)."""
+    span = stats.get("span")
+    if not span:
+        return "no packet time: rates not computed"
+    text = (f"packet times {time_text(stats.get('first_time'), epoch)} to {time_text(stats.get('last_time'), epoch)}; "
+            f"rates over the {span:.0f} s ({span / 60:.1f} min) the packet times cover")
+    if stats.get("time_breaks"):
+        text += f" ({stats['time_breaks']} breaks in the times left out)"
+    return text
+
+
+def service_lines(services, span, stats=None, epoch=None) -> list[str]:
     """Text of the packets per PUS service: totals per service, then per APID and service."""
     lines = ["", "Packets by PUS service (idle packets left out; –: no PUS data field header, e.g. time reports):"]
     if not services:
         return lines + ["  none"]
-    covered = (f"rates over the {span:.0f} s ({span / 60:.1f} min) between the first and last packet time"
-               if span else "no packet time: rates not computed")
+    covered = coverage_text(stats if stats is not None else {"span": span}, epoch)
     table = [("service", "APIDs", "packets", "bytes", "share", "B/s", "MB/day")]
     for t in service_totals(services):
         table.append((_service_name(t["service"], t["subtype"]), _apid_text(t["apids"]), t["packets"], t["bytes"],
@@ -1009,8 +1063,78 @@ def export_packets(data: bytes, rows, folder: str, interleave: int = 5, randomiz
     return dict(counts)
 
 
+def unaccounted_bytes(rows, data_len: int, unit_len: int) -> dict:
+    """The bytes of the file in no CADU (or transfer frame): at the start, between them (offset, bytes) and at
+    the end, and their total."""
+    offsets = sorted(r["offset"] for r in rows)
+    if not offsets:
+        return {"lead": data_len, "gaps": [], "tail": 0, "total": data_len}
+    gaps = [(a + unit_len, b - a - unit_len) for a, b in zip(offsets, offsets[1:]) if b - a > unit_len]
+    lead, tail = offsets[0], max(0, data_len - offsets[-1] - unit_len)
+    return {"lead": lead, "gaps": gaps, "tail": tail, "total": lead + sum(n for _, n in gaps) + tail}
+
+
+def unaccounted_text(info: dict, unit: str = "CADUs") -> str:
+    """One line on the bytes in no CADU or frame ("" when there are none)."""
+    if not info["total"]:
+        return ""
+    parts = []
+    if info["lead"]:
+        parts.append(f"{info['lead']} at the start")
+    if info["gaps"]:
+        parts.append(f"{sum(n for _, n in info['gaps'])} in {len(info['gaps'])} stretches between them "
+                     f"(first at byte {info['gaps'][0][0]})")
+    if info["tail"]:
+        parts.append(f"{info['tail']} at the end (not a whole frame)")
+    return f"{info['total']} bytes of the file are in no {unit[:-1].lower()}: " + ", ".join(parts)
+
+
+def single_vc_note(good) -> str:
+    """With one virtual channel only in the file, the master channel counter jumps over the frames of the other
+    VCs: not frames lost. "" otherwise."""
+    vcs = {r["vcid"] for r in good}
+    if len(vcs) != 1 or not _counter_gaps([r["mc_count"] for r in good])[1]:
+        return ""
+    return (f"only VC {vcs.pop()} is in the file: the master channel counter also counts the frames of the other "
+            "VCs, not in this file; the frames lost are in the VC counter (Virtual channels: jumps, missing)")
+
+
+def export_tables(stats: dict, folder: str, epoch=None) -> list[str]:
+    """The packet tables of the summary as CSV files in ``folder``: vcs, apids, services, service_totals, sids,
+    gaps. Returns the names of the files written."""
+    os.makedirs(folder, exist_ok=True)
+
+    def write(name, rows, fields):
+        with open(os.path.join(folder, name), "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+            w.writeheader()
+            for r in rows:
+                w.writerow({k: ("" if r.get(k) is None else r.get(k)) for k in fields})
+        return name
+
+    vcs = [dict(vc=vc, **v) for vc, v in sorted(stats["vcs"].items())]
+    sids = [dict(h, first=time_text(h["first_time"], epoch), last=time_text(h["last_time"], epoch))
+            for h in stats.get("sids", [])]
+    totals = [dict(t, apids=_apid_text(t["apids"])) for t in service_totals(stats.get("services", []))]
+    return [
+        write("vcs.csv", vcs, ["vc", "frames", "idle_frames", "packets", "packet_bytes", "idle_packet_bytes", "cut",
+                               "resyncs"]),
+        write("apids.csv", [dict(a, services=services_text(a.get("services"))) for a in stats["apids"]],
+              ["apid", "vc", "packets", "bytes", "min_length", "max_length", "services", "first_seq", "last_seq",
+               "gaps", "missing", "gaps_lost_frames", "missing_lost_frames", "back_jumps", "repeated"]),
+        write("services.csv", stats.get("services", []),
+              ["apid", "service", "subtype", "vc", "packets", "bytes", "share", "min_length", "max_length", "period",
+               "bytes_per_s", "mb_per_day"]),
+        write("service_totals.csv", totals,
+              ["service", "subtype", "apids", "packets", "bytes", "share", "bytes_per_s", "mb_per_day"]),
+        write("sids.csv", sids, ["apid", "service", "subtype", "sid", "vc", "packets", "bytes", "min_length",
+                                 "max_length", "period", "per_day", "mb_per_day", "first", "last", "first_frame"]),
+        write("gaps.csv", stats["gaps"], ["apid", "vc", "before", "after", "missing", "frame_before", "frame"]),
+    ]
+
+
 def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50, all_rows=None, packets=None,
-            checked_apids=None, unit: str = "CADUs") -> list[str]:
+            checked_apids=None, unit: str = "CADUs", epoch=None) -> list[str]:
     """Summary of a file of CADUs: counts, Reed-Solomon, spacecraft, virtual channels, frame counters, CLCW
     and, with ``packets`` (from packet_statistics), the packets per VC and APID.
 
@@ -1024,8 +1148,9 @@ def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50, all_rows=N
         per_file = Counter(r["file"] for r in all_rows)
         lines.append("Files concatenated (frames starting in each): "
                      + ", ".join(f"{name} {count}" for name, count in per_file.items()))
-    if n * cadu_len < data_len and unit != "CADUs":
-        lines.append(f"  {data_len - n * cadu_len} bytes at the end of the file are not a whole frame")
+    lost = unaccounted_text(unaccounted_bytes(all_rows, data_len, cadu_len), unit) if n else ""
+    if lost:
+        lines.append(f"  {lost}")
     lines += (reed_solomon_lines(all_rows, max_listed, list_bad=len(rows) == n) if unit == "CADUs"
               else ["Reed-Solomon: none (transfer frames carry no check symbols)"])
     if len(rows) < n:
@@ -1044,6 +1169,9 @@ def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50, all_rows=N
         jumps, missing = _counter_gaps([r["mc_count"] for r in good])
         lines.append(f"Master channel counter: {good[0]['mc_count']} → {good[-1]['mc_count']}, {jumps} jumps, "
                      f"about {missing} frames missing (8-bit counter: gaps modulo 256)")
+        note = single_vc_note(good)
+        if note:
+            lines.append(f"  Note: {note}")
 
         lines.append("")
         lines.append("Virtual channels" + (" (uncorrectable frames not counted: their header is unreliable):"
@@ -1086,7 +1214,7 @@ def summary(rows, data_len: int, cadu_len: int, max_listed: int = 50, all_rows=N
                 lines.append(f"    ... {len(odd) - max_listed} more (--frames and -o list every frame)")
     if packets is not None:
         lines.append("")
-        lines += packet_lines(packets, max_listed, checked_apids)
+        lines += packet_lines(packets, max_listed, checked_apids, epoch)
     return lines
 
 
@@ -1467,6 +1595,12 @@ def main(argv=None) -> int:
     ap.add_argument("--check-apids", default=DEFAULT_CHECKED_APIDS, metavar="LIST",
                     help="APIDs whose sequence count continuity is checked, e.g. 100 or 15-16,100 (default "
                          f"{DEFAULT_CHECKED_APIDS}: time reporting and science data); the others may be filtered on board")
+    ap.add_argument("--epoch", default="none", metavar="EPOCH",
+                    help="epoch of the CUC packet times, to show them as dates: none (default: seconds), gps "
+                         "(1980-01-06), tai (1958-01-01), unix, 2000, or a date such as 2000-01-01")
+    ap.add_argument("--export-tables", metavar="FOLDER",
+                    help="write the packet tables of the summary (VCs, APIDs, services, SIDs, gaps) as CSV files "
+                         "to FOLDER")
     ap.add_argument("--export-packets", metavar="FOLDER",
                     help="write the packets of each APID to FOLDER/apid_NNNN.bin and their list to "
                          "FOLDER/packets.csv (idle packets left out)")
@@ -1483,17 +1617,24 @@ def main(argv=None) -> int:
         checked_apids = parse_apids(args.check_apids)
     except ValueError as exc:
         ap.error(f"--check-apids: {exc}")
+    try:
+        args.epoch_value = parse_epoch(args.epoch)
+    except ValueError:
+        ap.error(f"--epoch: not an epoch: {args.epoch} (none, gps, tai, unix, 2000 or a date as 2000-01-01)")
+    if args.export_tables and args.no_packets:
+        ap.error("--export-tables contradicts --no-packets")
     if args.export_packets and args.no_packets:
         ap.error("--export-packets contradicts --no-packets")
     if args.frame_length and args.input == "cadu":
         ap.error("--frame-length applies to a file of transfer frames, not of CADUs")
     if args.frame_length and not 8 <= args.frame_length <= MAX_FRAME_LEN:
         ap.error(f"the frame length must be 8 to {MAX_FRAME_LEN} bytes")
-    if len(args.file) > 1 and not args.concat and (args.output or args.export_packets):
-        ap.error("-o and --export-packets with several files need --concat (one stream)")
+    if len(args.file) > 1 and not args.concat and (args.output or args.export_packets or args.export_tables):
+        ap.error("-o, --export-packets and --export-tables with several files need --concat (one stream)")
 
     if args.overview:
-        if args.concat or args.show or args.output or args.export_packets or args.frames is not None:
+        if (args.concat or args.show or args.output or args.export_packets or args.export_tables
+                or args.frames is not None):
             ap.error("--overview gives the table and the summary of each file only (no --concat, --show, --frames, "
                      "-o, --export-packets)")
         randomization = "no" if args.not_randomized else args.randomization
@@ -1557,7 +1698,11 @@ def _analyse(args, ap, name: str, data: bytes, checked_apids, bounds=None) -> in
     packets = None if args.no_packets else packet_statistics(data, rows, args.interleave, randomized, args.fecf,
                                                              frame_length=frame_length)
     print("\n".join(summary(analysed, len(data), cadu_len, all_rows=rows, packets=packets,
-                             checked_apids=checked_apids, unit="Transfer frames" if frame_length else "CADUs")))
+                             checked_apids=checked_apids, unit="Transfer frames" if frame_length else "CADUs",
+                             epoch=args.epoch_value)))
+    if args.export_tables:
+        names = export_tables(packets, args.export_tables, args.epoch_value)
+        print(f"\nTables written to {args.export_tables}: {', '.join(names)}")
 
     if args.frames is not None:
         shown = analysed if args.frames == 0 else analysed[:args.frames]
