@@ -399,3 +399,56 @@ def test_overview_one_row_per_file(tmp_path, capsys):
     assert (o["frames"], o["uncorrectable"], o["vcs"]) == (9, 0, {1: 9}) and o["packets"] >= 30
     with pytest.raises(SystemExit):
         cd.main([str(late), str(early), "--overview", "--concat"])
+
+
+def _pus_packet(apid, seq, size, service, subtype, seconds, sid=None):
+    """A PUS-C TM packet of ``size`` bytes: data field header with P-field 2F (CUC 4 + 3 bytes), then the SID."""
+    head = (bytes([0x23, service, subtype, 0, 0, 0, 0, 0x2F]) + seconds.to_bytes(4, "big") + bytes(3)
+            + (sid.to_bytes(2, "big") if sid is not None else b""))
+    body = head + bytes(size - 6 - len(head))
+    return (0x0800 | apid).to_bytes(2, "big") + (0xC000 | seq).to_bytes(2, "big") + (len(body) - 1).to_bytes(2, "big") + body
+
+
+def test_pus_fields_of_a_real_hk_packet():
+    # Start of a packet of an AWS capture: APID 46, PUS-C 3,25, CUC 580D2A71 A40F00, SID 5.
+    head = bytes.fromhex("082ef1c900ff2303190000 00002f580d2a71a40f00 0005 01b8ff".replace(" ", ""))
+    pus = cd.pus_fields(head)
+    assert (pus["pus"], pus["service"], pus["subtype"], pus["sid"], pus["sid_offset"]) == (2, 3, 25, 5, 21)
+    assert pus["time"] == 0x580D2A71 + 0xA40F00 / (1 << 24)
+    other = bytes.fromhex("080ffab8009d23020900000000 2f580d2a73b63400".replace(" ", ""))
+    assert cd.pus_fields(other) == {"pus": 2, "service": 2, "subtype": 9, "time": 0x580D2A73 + 0xB63400 / (1 << 24),
+                                    "sid_offset": 21}   # 2,9: no SID
+    assert cd.pus_fields(_packet(51, 0, 40)) == {}       # no secondary header
+
+
+def test_sids_of_the_hk_reports(tmp_path, capsys):
+    stream = []
+    for t in range(64):
+        stream.append(_pus_packet(46, t, 264, 3, 25, 1000 + t, sid=5))              # every second
+        if t % 16 == 0:
+            stream.append(_pus_packet(36, t // 16, 266, 3, 25, 1000 + t, sid=3))   # every 16 s
+        stream.append(_pus_packet(15, t, 164, 2, 9, 1000 + t))
+    data = b"".join(_frames_from_stream(stream, 1, 0, 0))
+    stats = cd.packet_statistics(data, cd.decode_all(data))
+    sids = {(h["apid"], h["sid"]): h for h in stats["sids"]}
+    assert set(sids) == {(46, 5), (36, 3)}
+    assert (sids[(46, 5)]["packets"], sids[(46, 5)]["period"], sids[(46, 5)]["per_day"]) == (64, 1, 86400)
+    assert (sids[(36, 3)]["packets"], sids[(36, 3)]["period"], sids[(36, 3)]["max_length"]) == (4, 16, 266)
+    assert sids[(46, 5)]["mb_per_day"] == 86400 * 264 / 1e6
+    by = {a["apid"]: a for a in stats["apids"]}
+    assert by[15]["services"] == {(2, 9): 64} and by[46]["services"] == {(3, 25): 64}
+
+    path = tmp_path / "cadu.bin"
+    path.write_bytes(data)
+    assert cd.main([str(path), "--export-packets", str(tmp_path / "out")]) == 0
+    text = capsys.readouterr().out
+    section = text.split("Housekeeping reports by SID")[1]
+    rows = {tuple(line.split()[:3]) for line in section.splitlines()[2:4]}
+    assert rows == {("36", "3,25", "3"), ("46", "3,25", "5")}
+    assert "2 SIDs" in section
+    listed = (tmp_path / "out" / "packets.csv").read_text().splitlines()
+    assert listed[0].endswith("service,subtype,sid,time")
+    assert listed[1].split(",")[8:11] == ["3", "25", "5"]
+
+    shown = "\n".join(cd.show_cadu(1, cd.decode_all(data)[0], data, 5, True, False, dump=False))
+    assert "service  SID" in shown and " 3,25    5" in shown

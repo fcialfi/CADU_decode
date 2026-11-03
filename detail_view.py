@@ -168,13 +168,15 @@ class DetailView(Page):
                 note += f"; data field bytes 0-{fhp - 1}: end of a packet started in a previous frame"
             self._section(f"Space Packets starting in this frame ({len(packets)})", note)
             self._table((("At byte", 70), ("Version", 65), ("Type", 50), ("Sec. hdr", 70), ("APID", 60),
-                         ("Seq. flags", 80), ("Seq. count", 85), ("Length", 70), ("", 220)),
-                        [(start + p["offset"], "", "", "", "", "", "", "", "header continues in the next frame")
+                         ("Seq. flags", 80), ("Seq. count", 85), ("Length", 70), ("Service", 70), ("SID", 60),
+                         ("", 220)),
+                        [(start + p["offset"], "", "", "", "", "", "", "", "", "", "header continues in the next frame")
                          if "apid" not in p else
                          (start + p["offset"], p["version"], p["type"], p["sec_header_flag"], p["apid"],
                           f"{p['sequence_flags']:02b}", p["sequence_count"], p["length"],
+                          cd.service_text(p["pus"]) or "–", p["pus"].get("sid", "–"),
                           "continues in the next frame" if p["continues"] else "")
-                         for p in packets], anchors={8: "w"})
+                         for p in packets], anchors={10: "w"})
 
         # Hex dump.
         if dump:
