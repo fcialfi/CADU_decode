@@ -95,6 +95,25 @@ class Page(ttk.Frame):
         tk.Label(card, text=sub, bg=CARD, fg=MUTED, font=self.f_small, justify="left").pack(
             anchor="w", padx=12, pady=(0, 10))
 
+    @staticmethod
+    def _sort_key(text):
+        """Numbers (also 1,234, 12.5 %, 26–169) sort as numbers, before the texts; empty and – last."""
+        import re
+
+        match = re.search(r"-?\d[\d,]*\.?\d*", text)
+        if text in ("", "–") or not match:
+            return (1 if text not in ("", "–") else 2, 0.0, text)
+        return (0, float(match.group().replace(",", "")), text)
+
+    def _sort(self, tree, column):
+        """Sort the rows of a table by a column; a second click reverses the order."""
+        reverse = getattr(tree, "_sorted", None) == (column, False)
+        items = [(self._sort_key(tree.set(item, str(column))), item) for item in tree.get_children("")]
+        items.sort(reverse=reverse)
+        for index, (_key, item) in enumerate(items):
+            tree.move(item, "", index)
+        tree._sorted = (column, reverse)
+
     def _table(self, columns, rows, height=None, goto_column=None, anchors=None):
         """A Treeview in a card; ``goto_column``: index of the CADU number (double click opens it)."""
         card = self._card()
@@ -103,7 +122,7 @@ class Page(ttk.Frame):
         names = [str(k) for k in range(len(columns))] + ["fill"]  # an empty last column takes the spare width
         tree = ttk.Treeview(card, columns=names, show="headings", height=height or min(max(len(rows), 1), 10))
         for k, (heading, width) in enumerate(columns):
-            tree.heading(str(k), text=heading)
+            tree.heading(str(k), text=heading, command=lambda c=k: self._sort(tree, c))
             anchor = (anchors or {}).get(k, "e")
             tree.column(str(k), width=max(width, heading_font.measure(heading) + 20), anchor=anchor, stretch=False)
         tree.heading("fill", text="")
@@ -128,19 +147,30 @@ class Page(ttk.Frame):
 class SummaryView(Page):
     """The summary of a file; ``update_view`` fills it, ``on_goto(number)`` opens a CADU."""
 
-    def __init__(self, parent, on_goto=None, check_var=None, on_check=None):
+    def __init__(self, parent, on_goto=None, check_var=None, on_check=None, part="summary"):
         super().__init__(parent, on_goto)
+        self.part = part  # "summary": frames, Reed-Solomon, VCs, CLCW; "packets": the packet tables
+        self.epoch = None
         self.chart_data = None
         # APIDs whose sequence count continuity is checked (text, e.g. "100, 15-16"); on_check() applies it.
         self.check_var = check_var or tk.StringVar(value=cd.DEFAULT_CHECKED_APIDS)
         self.on_check = on_check
         self._message("Open a file of CADUs or of transfer frames to see its summary.")
 
-    def update_view(self, rows, all_rows, data_len, cadu_len, packets=None, unit="CADUs"):
+    def update_view(self, rows, all_rows, data_len, cadu_len, packets=None, unit="CADUs", epoch=None):
         """Fill the page: ``rows`` analysed, ``all_rows`` every CADU of the file, ``packets`` the packet
-        statistics (cadu_decode.packet_statistics)."""
+        statistics (cadu_decode.packet_statistics), ``epoch`` of the packet times (None: seconds)."""
+        self.epoch = epoch
         if not all_rows:
             self._message("No sync marker 1ACFFC1D found.")
+            return
+        if self.part == "packets":
+            if packets is None:
+                self._message("Packets not rebuilt.")
+                return
+            self._clear()
+            self._packets(packets)
+            tk.Frame(self.page, bg=BG, height=16).pack()
             return
         self._clear()
         n = len(all_rows)
@@ -175,7 +205,12 @@ class SummaryView(Page):
         scids = Counter(r["scid"] for r in good).most_common()
         self._tile(tiles, "Spacecraft ID", str(scids[0][0]) if scids else "–",
                    (", ".join(f"{k}: {v}" for k, v in scids[1:4]) or "the only one") +
-                   f"\nmaster counter: {mc_missing} missing", TEXT)
+                   ("\nmaster counter: other VCs not in the file" if cd.single_vc_note(good)
+                    else f"\nmaster counter: {mc_missing} missing"), TEXT)
+        lost = cd.unaccounted_text(cd.unaccounted_bytes(all_rows, data_len, cadu_len), unit)
+        if lost:
+            tk.Label(self.page, text=lost[0].upper() + lost[1:] + ".", bg=BG, fg=WARN, font=self.f_small).pack(
+                anchor="w", padx=16, pady=(8, 0))
         if excluded:
             tk.Label(self.page, text=f"Analysis on {len(rows):,} frames: {excluded} uncorrectable frames excluded "
                      "(still counted in the frame error rate).", bg=BG, fg=WARN, font=self.f_small).pack(
@@ -213,8 +248,14 @@ class SummaryView(Page):
             tk.Label(self.page, text=f"Master channel counter: {good[0]['mc_count']} → {good[-1]['mc_count']}, "
                      f"{mc_jumps} jumps, about {mc_missing} frames missing (8-bit counters: gaps modulo 256)",
                      bg=BG, fg=MUTED, font=self.f_small).pack(anchor="w", padx=16, pady=(4, 0))
+            note = cd.single_vc_note(good)
+            if note:
+                tk.Label(self.page, text=note[0].upper() + note[1:] + ".", bg=BG, fg=WARN, font=self.f_small).pack(
+                    anchor="w", padx=16)
         if packets is not None:
-            self._packets(packets)
+            tk.Label(self.page, text=f"Packets: {sum(v['packets'] for v in packets['vcs'].values()):,} rebuilt — "
+                     "tables per VC, APID, service and SID in the Packets tab.", bg=BG, fg=MUTED,
+                     font=self.f_small).pack(anchor="w", padx=16, pady=(8, 0))
 
         # CLCW.
         with_ocf = [r for r in rows if r["ocf_flag"]]
@@ -323,14 +364,15 @@ class SummaryView(Page):
                           ", ".join(f"VC {v}" for v in g["found_in"]) or "–") for g in gaps],
                         goto_column=6, anchors={7: "w"})
 
+        self._stats = stats
         self._services(stats.get("services", []), stats.get("span"))
         self._sids(stats.get("sids", []))
 
     def _services(self, services, span):
         """The packets per PUS service: totals per service, then per APID and service."""
-        covered = (f"rates over the {span:.0f} s ({span / 60:.1f} min) between the first and last packet time"
-                   if span else "no packet time: rates not computed")
-        self._section("Packets by PUS service", f"idle packets left out; –: no PUS header (e.g. time reports); {covered}")
+        self._section("Packets by PUS service", "idle packets left out; –: no PUS header (e.g. time reports)")
+        tk.Label(self.page, text=cd.coverage_text(self._stats, self.epoch), bg=BG, fg=MUTED,
+                 font=self.f_small).pack(anchor="w", padx=16, pady=(0, 4))
         if not services:
             tk.Label(self.page, text="No packets.", bg=BG, fg=MUTED, font=self.f_small).pack(anchor="w", padx=16)
             return
@@ -344,7 +386,7 @@ class SummaryView(Page):
         self._table((("Service", 80), ("APIDs", 220), ("Packets", 90), ("Bytes", 110), ("Share", 70), ("B/s", 80),
                      ("MB/day", 80)), rows, anchors={0: "w", 1: "w"})
         self._section("Packets by APID and service", "period: median interval of the packet times (periodic "
-                      "packets); B/s and MB/day: bytes over the time the file covers")
+                      "packets); B/s and MB/day: bytes over the time the packet times cover")
         rows = []
         for v in services:
             length = str(v["min_length"]) if v["min_length"] == v["max_length"] else \

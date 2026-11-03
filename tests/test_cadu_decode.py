@@ -318,7 +318,7 @@ def test_transfer_frames_cli(tmp_path, capsys):
     assert cd.main([str(path)]) == 0
     text = capsys.readouterr().out
     assert "transfer frames of 1115 bytes (detected), no sync marker, no Reed-Solomon code" in text
-    assert "Transfer frames: 12 of 1115 bytes" in text and "2 bytes at the end of the file" in text
+    assert "Transfer frames: 12 of 1115 bytes" in text and "2 bytes of the file are in no transfer frame: 2 at the end" in text
     assert "Reed-Solomon: none" in text and "Spacecraft IDs: 104 (12 frames)" in text
     assert cd.main([str(path), "--show", "2", "--no-dump"]) == 0
     text = capsys.readouterr().out
@@ -481,4 +481,62 @@ def test_packets_by_service(capsys, tmp_path):
     assert cd.main([str(path)]) == 0
     text = capsys.readouterr().out.split("Packets by PUS service")[1].split("Housekeeping reports by SID")[0]
     assert "rates over the 59 s" in text and "By APID and service:" in text
+    assert "packet times 1000.000 s to 1059.000 s" in text
     assert any(line.split()[:2] == ["2,9", "15"] for line in text.splitlines())
+
+
+def test_bytes_in_no_cadu_are_reported():
+    c = [_cadu(k, k) for k in range(6)]
+    data = c[0] + c[1] + b"\x00" * 5000 + c[2] + c[3] + b"\x11" * 1279 + c[4] + c[5] + b"xy"
+    rows = cd.decode_all(data)
+    info = cd.unaccounted_bytes(rows, len(data), 1279)
+    assert (info["lead"], info["tail"], info["total"]) == (0, 2, 6281)
+    assert info["gaps"] == [(2 * 1279, 5000), (4 * 1279 + 5000, 1279)]
+    text = "\n".join(cd.summary(rows, len(data), 1279))
+    assert "6281 bytes of the file are in no cadu: 6279 in 2 stretches between them (first at byte 2558), 2 at " \
+           "the end" in text
+
+
+def test_master_counter_with_one_vc_only():
+    rows = cd.decode_all(b"".join(_cadu(2 * k, k, vcid=3) for k in range(10)))
+    text = "\n".join(cd.summary(rows, 10 * 1279, 1279))
+    assert "about 9 frames missing" in text and "Note: only VC 3 is in the file" in text
+    both = cd.decode_all(b"".join(_cadu(2 * k + v, k, vcid=v + 1) for k in range(5) for v in (0, 1)))
+    assert "only VC" not in "\n".join(cd.summary(both, 10 * 1279, 1279))
+
+
+def test_rates_ignore_breaks_in_the_times():
+    stream = [_pus_packet(46, k, 100, 3, 25, 1000 + k, sid=5) for k in range(100)]
+    stream.append(_pus_packet(46, 100, 100, 3, 25, 1000 + 86400 * 30, sid=5))   # a wrong time, 30 days later
+    data = b"".join(_frames_from_stream(stream, 1, 0, 0))
+    stats = cd.packet_statistics(data, cd.decode_all(data))
+    assert (stats["span"], stats["time_breaks"]) == (99, 1)
+    (hk,) = [v for v in stats["services"] if v["service"] == 3]
+    assert hk["bytes_per_s"] == 101 * 100 / 99
+    assert cd.time_coverage([]) == (None, 0) and cd.time_coverage([5, 5]) == (None, 0)
+
+
+def test_epoch_and_time_text():
+    assert cd.parse_epoch("gps") == cd.datetime(1980, 1, 6) and cd.parse_epoch("none") is None
+    assert cd.parse_epoch("2000-01-01") == cd.datetime(2000, 1, 1)
+    assert cd.time_text(86400 + 0.25, cd.EPOCHS["gps"]) == "1980-01-07 00:00:00.250"
+    assert cd.time_text(12.5) == "12.500 s" and cd.time_text(None) == "–"
+
+
+def test_export_tables(tmp_path, capsys):
+    stream = []
+    for t in range(30):
+        stream.append(_pus_packet(46, t, 264, 3, 25, 1000 + t, sid=5))
+        stream.append(_pus_packet(15, t, 164, 2, 9, 1000 + t))
+    path = tmp_path / "cadu.bin"
+    path.write_bytes(b"".join(_frames_from_stream(stream, 1, 0, 0)))
+    out = tmp_path / "tables"
+    assert cd.main([str(path), "--export-tables", str(out), "--epoch", "gps"]) == 0
+    assert "Tables written to" in capsys.readouterr().out
+    assert sorted(p.name for p in out.iterdir()) == ["apids.csv", "gaps.csv", "service_totals.csv", "services.csv",
+                                                      "sids.csv", "vcs.csv"]
+    sids = (out / "sids.csv").read_text().splitlines()
+    assert sids[0].startswith("apid,service,subtype,sid") and sids[1].startswith("46,3,25,5,1,30,")
+    assert "1980-01-06 00:16:40.000" in sids[1]   # first packet time 1000 s from the GPS epoch
+    totals = (out / "service_totals.csv").read_text()
+    assert "\n2,9,15,30," in totals and "\n3,25,46,30," in totals   # service and subtype in two columns
