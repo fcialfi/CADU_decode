@@ -222,9 +222,11 @@ salta la ricostruzione.
   più frequente e di quelle diverse, e dei frame non correggibili; doppio clic su una riga: apre il CADU;
 - scheda **Packets**: le tabelle dei pacchetti: per VC, per APID (in arancione gli APID con salti del sequence
   count), i salti senza frame persi, per servizio PUS e per APID e servizio (con i tempi dei pacchetti), e i SID;
-  **Time epoch** in alto sceglie l'epoca per mostrare i tempi come date (come `--epoch`);
+  **Time epoch**, sulla riga del nome del file, sceglie l'epoca per mostrare i tempi come date (come `--epoch`);
 - in tutte le tabelle del riepilogo un clic sull'intestazione di una colonna ordina le righe (i numeri come numeri),
   un secondo clic inverte l'ordine;
+- le tabelle mostrano fino a 30 righe senza barra di scorrimento propria, le colonne sono larghe quanto il loro
+  contenuto e le note vanno a capo; su uno schermo piccolo la finestra si apre più piccola di 1320 × 880;
 - scheda **Text report**: lo stesso riepilogo come testo, con **Copy to clipboard**;
 - scheda **Frames**: la tabella dei frame, con filtro per virtual channel e caselle che,
   spuntate, mostrano meno frame: **Hide idle frames**, **Only RS errors**, **Only unusual CLCW**; **Go to #**. Selezionando una riga, sotto compare il CADU in forma
